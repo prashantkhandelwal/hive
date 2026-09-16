@@ -25,7 +25,7 @@ Install the Rust toolchain and the platform linker, then run:
 cargo run --release
 ```
 
-Select one listener with `--protocol`, or use `both` explicitly:
+Select the tracker protocol with `--protocol`, or use `both` explicitly:
 
 ```powershell
 cargo run --release -- --protocol http
@@ -33,33 +33,36 @@ cargo run --release -- --protocol udp
 cargo run --release -- --protocol both
 ```
 
-Without `--protocol`, Hive uses `HIVE_DEFAULT_PROTOCOL`. Its default value is
-`both`, so the HTTP and UDP listeners run when neither option is configured.
+Without `--protocol`, Hive uses `default_protocol` from `hive.toml`. Its default
+value is `both`, so the HTTP and UDP listeners run when neither option is
+configured.
 
 Open `http://localhost:3000` for the dashboard. The default SQLite database is
-created as `hive.db` in the working directory.
+created as `hive.db` in the working directory. The dashboard remains available
+when `udp` is selected; in that mode, HTTP announce and scrape routes are not
+enabled.
 
 ## Configuration
 
-Hive reads configuration from environment variables.
+Hive reads configuration from `hive.toml` in the working directory.
 
-| Variable | Default | Purpose |
+| Setting | Default | Purpose |
 | --- | --- | --- |
-| `HIVE_DEFAULT_PROTOCOL` | `both` | Listener mode: `http`, `udp`, or `both` |
-| `HIVE_HTTP_ADDR` | `[::]:3000` | HTTP listen address |
-| `HIVE_UDP_ADDR` | `[::]:6969` | UDP listen address |
-| `HIVE_DATABASE_PATH` | `hive.db` | SQLite database path |
-| `HIVE_AUTH_TOKEN` | Empty | Optional HTTP bearer token |
-| `HIVE_ANNOUNCE_INTERVAL` | `1800` | Client reannounce interval in seconds |
-| `HIVE_PEER_TIMEOUT` | `3600` | Maximum idle peer age in seconds |
-| `HIVE_PERSISTENCE_INTERVAL` | `30` | Snapshot interval in seconds |
-| `HIVE_RATE_LIMIT_PER_MINUTE` | `120` | Per-source-IP request allowance |
-| `RUST_LOG` | `hive_tracker=info` | Tracing filter |
+| `default_protocol` | `both` | Listener mode: `http`, `udp`, or `both` |
+| `http_addr` | `0.0.0.0:3000` | Web UI and HTTP tracker listen address |
+| `udp_addr` | `[::]:6969` | UDP listen address |
+| `database_path` | `hive.db` | SQLite database path |
+| `auth_token` | Unset | Optional HTTP bearer token |
+| `announce_interval` | `1800` | Client reannounce interval in seconds |
+| `peer_timeout` | `3600` | Maximum idle peer age in seconds |
+| `persistence_interval` | `30` | Snapshot interval in seconds |
+| `rate_limit_per_minute` | `120` | Per-source-IP request allowance |
+| `log_filter` | `hive_tracker=info` | Tracing filter |
 
-The `--protocol` command-line argument overrides `HIVE_DEFAULT_PROTOCOL` for the
-current process.
+Use `--config path/to/config.toml` to load another file. The `--protocol`
+command-line argument overrides `default_protocol` for the current process.
 
-When `HIVE_AUTH_TOKEN` is set, `/announce`, `/scrape`, and `/metrics` require
+When `auth_token` is set, `/announce`, `/scrape`, and `/metrics` require
 the following header:
 
 ```http

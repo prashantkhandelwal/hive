@@ -56,15 +56,21 @@ struct ApiError {
     message: String,
 }
 
-pub fn router(context: AppContext) -> Router {
+pub fn router(context: AppContext, enable_http_tracker: bool) -> Router {
     let app_metrics = context.metrics.clone();
-    Router::new()
+    let router = Router::new()
         .route("/", get(index))
-        .route("/announce", get(announce))
-        .route("/scrape", get(scrape))
         .route("/stats", get(statistics))
         .route("/metrics", get(metrics))
-        .route("/health", get(health))
+        .route("/health", get(health));
+    let router = if enable_http_tracker {
+        router
+            .route("/announce", get(announce))
+            .route("/scrape", get(scrape))
+    } else {
+        router
+    };
+    router
         .with_state(context)
         .layer(middleware::from_fn_with_state(app_metrics, observe_traffic))
 }

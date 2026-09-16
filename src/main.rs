@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -23,19 +23,19 @@ use tracing_subscriber::EnvFilter;
 struct Cli {
     #[arg(long, value_enum, help = "Protocol listener to run")]
     protocol: Option<Protocol>,
+
+    #[arg(long, default_value = "hive.toml", help = "Configuration file path")]
+    config: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let config = AppConfig::from_file(&cli.config)?;
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("hive_tracker=info")),
-        )
+        .with_env_filter(EnvFilter::new(&config.log_filter))
         .init();
 
-    let cli = Cli::parse();
-    let config = AppConfig::from_env()?;
     let protocol = resolve_protocol(cli.protocol, config.default_protocol);
     let state = Arc::new(TrackerState::default());
     let persistence = Persistence::open(&config.database_path).await?;
@@ -56,15 +56,9 @@ async fn main() -> Result<()> {
         rate_limiter: Arc::clone(&rate_limiter),
         started_at: Instant::now(),
     };
-    let listener = if matches!(protocol, Protocol::Http | Protocol::Both) {
-        Some(
-            TcpListener::bind(config.http_addr)
-                .await
-                .with_context(|| format!("failed to bind HTTP listener at {}", config.http_addr))?,
-        )
-    } else {
-        None
-    };
+    let listener = TcpListener::bind(config.http_addr)
+        .await
+        .with_context(|| format!("failed to bind web listener at {}", config.http_addr))?;
     let udp = if matches!(protocol, Protocol::Udp | Protocol::Both) {
         Some(
             UdpTracker::bind(
@@ -90,7 +84,7 @@ async fn main() -> Result<()> {
     ));
     let traffic_log_task = tokio::spawn(log_traffic(metrics));
     info!(?protocol, "Hive tracker started");
-    run_protocols(listener, udp, context).await?;
+    run_protocols(listener, udp, context, protocol).await?;
 
     persistence_task.abort();
     traffic_log_task.abort();
@@ -124,20 +118,19 @@ fn resolve_protocol(command_line: Option<Protocol>, configured: Protocol) -> Pro
 }
 
 async fn run_protocols(
-    listener: Option<TcpListener>,
+    listener: TcpListener,
     udp: Option<UdpTracker>,
     context: AppContext,
+    protocol: Protocol,
 ) -> Result<()> {
     let http_server = async {
-        let Some(listener) = listener else {
-            return std::future::pending::<Result<()>>().await;
-        };
         axum::serve(
             listener,
-            router(context).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            router(context, matches!(protocol, Protocol::Http | Protocol::Both))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .await
-        .context("HTTP server failed")
+        .context("web server failed")
     };
     let udp_server = async {
         let Some(udp) = udp else {

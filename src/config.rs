@@ -1,7 +1,8 @@
-use std::{env, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{fs, net::SocketAddr, path::Path, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
+use serde::Deserialize;
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq)]
@@ -10,7 +11,8 @@ pub struct ProtocolParseError {
     value: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Http,
     Udp,
@@ -43,40 +45,73 @@ pub struct AppConfig {
     pub peer_timeout: Duration,
     pub persistence_interval: Duration,
     pub rate_limit_per_minute: u32,
+    pub log_filter: String,
 }
 
 impl AppConfig {
-    pub fn from_env() -> Result<Self> {
-        Ok(Self {
-            default_protocol: parse_env("HIVE_DEFAULT_PROTOCOL", "both")?,
-            http_addr: parse_env("HIVE_HTTP_ADDR", "[::]:3000")?,
-            udp_addr: parse_env("HIVE_UDP_ADDR", "[::]:6969")?,
-            database_path: env::var_os("HIVE_DATABASE_PATH")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("hive.db")),
-            auth_token: env::var("HIVE_AUTH_TOKEN")
-                .ok()
-                .filter(|value| !value.is_empty()),
-            announce_interval: parse_env("HIVE_ANNOUNCE_INTERVAL", "1800")?,
-            peer_timeout: Duration::from_secs(parse_env("HIVE_PEER_TIMEOUT", "3600")?),
-            persistence_interval: Duration::from_secs(parse_env(
-                "HIVE_PERSISTENCE_INTERVAL",
-                "30",
-            )?),
-            rate_limit_per_minute: parse_env("HIVE_RATE_LIMIT_PER_MINUTE", "120")?,
-        })
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read configuration from {}", path.display()))?;
+        Self::from_toml(&contents)
+            .with_context(|| format!("failed to parse configuration from {}", path.display()))
+    }
+
+    fn from_toml(contents: &str) -> Result<Self> {
+        let config: FileConfig = toml::from_str(contents)?;
+        Ok(config.into())
     }
 }
 
-fn parse_env<T>(name: &str, default: &str) -> Result<T>
-where
-    T: std::str::FromStr,
-    T::Err: std::error::Error + Send + Sync + 'static,
-{
-    env::var(name)
-        .unwrap_or_else(|_| default.to_owned())
-        .parse()
-        .with_context(|| format!("invalid value for {name}"))
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileConfig {
+    default_protocol: Protocol,
+    http_addr: SocketAddr,
+    udp_addr: SocketAddr,
+    database_path: PathBuf,
+    auth_token: Option<String>,
+    announce_interval: u32,
+    peer_timeout: u64,
+    persistence_interval: u64,
+    rate_limit_per_minute: u32,
+    log_filter: String,
+}
+
+impl Default for FileConfig {
+    fn default() -> Self {
+        Self {
+            default_protocol: Protocol::Both,
+            http_addr: "0.0.0.0:3000"
+                .parse()
+                .expect("default HTTP address is valid"),
+            udp_addr: "[::]:6969".parse().expect("default UDP address is valid"),
+            database_path: PathBuf::from("hive.db"),
+            auth_token: None,
+            announce_interval: 1800,
+            peer_timeout: 3600,
+            persistence_interval: 30,
+            rate_limit_per_minute: 120,
+            log_filter: "hive_tracker=info".to_owned(),
+        }
+    }
+}
+
+impl From<FileConfig> for AppConfig {
+    fn from(config: FileConfig) -> Self {
+        Self {
+            default_protocol: config.default_protocol,
+            http_addr: config.http_addr,
+            udp_addr: config.udp_addr,
+            database_path: config.database_path,
+            auth_token: config.auth_token.filter(|value| !value.is_empty()),
+            announce_interval: config.announce_interval,
+            peer_timeout: Duration::from_secs(config.peer_timeout),
+            persistence_interval: Duration::from_secs(config.persistence_interval),
+            rate_limit_per_minute: config.rate_limit_per_minute,
+            log_filter: config.log_filter,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -88,5 +123,24 @@ mod tests {
         let protocol = "HtTp".parse::<Protocol>();
 
         assert_eq!(protocol, Ok(Protocol::Http));
+    }
+
+    #[test]
+    fn given_toml_configuration_when_parsed_then_values_are_loaded() {
+        let config = AppConfig::from_toml(
+            r#"
+                default_protocol = "udp"
+                http_addr = "127.0.0.1:8080"
+                peer_timeout = 90
+                auth_token = "secret"
+            "#,
+        )
+        .expect("configuration should parse");
+
+        assert_eq!(config.default_protocol, Protocol::Udp);
+        assert_eq!(config.http_addr, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.peer_timeout, Duration::from_secs(90));
+        assert_eq!(config.auth_token.as_deref(), Some("secret"));
+        assert_eq!(config.udp_addr, "[::]:6969".parse().unwrap());
     }
 }
