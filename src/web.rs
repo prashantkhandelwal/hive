@@ -470,7 +470,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-const INDEX_HTML: &str = include_str!("../static/index.html");
+const INDEX_HTML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/static/index.html"));
 #[cfg(test)]
 mod tests {
     use super::*;
