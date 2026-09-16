@@ -7,6 +7,7 @@ use std::{
 };
 
 use tokio::net::UdpSocket;
+use tracing::debug;
 
 use crate::{
     metrics::AppMetrics,
@@ -59,6 +60,13 @@ impl UdpTracker {
             let response = self.handle_packet(&buffer[..length], remote);
             let egress_bytes = response.as_ref().map(Vec::len).unwrap_or_default();
             self.metrics.record_traffic("udp", length, egress_bytes);
+            debug!(
+                %remote,
+                ingress_bytes = length,
+                egress_bytes,
+                responded = response.is_some(),
+                "UDP packet handled"
+            );
             if let Some(response) = response {
                 self.socket.send_to(&response, remote).await?;
             }
@@ -72,6 +80,7 @@ impl UdpTracker {
         }
         let action = read_u32(packet, 8)?;
         let transaction_id = read_u32(packet, 12)?;
+        debug!(%remote, action, transaction_id, "processing UDP request");
         let response = match action {
             ACTION_CONNECT => self.connect(packet, remote, transaction_id),
             ACTION_ANNOUNCE => self.announce(packet, remote, transaction_id),

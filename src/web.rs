@@ -16,6 +16,7 @@ use axum::{
 };
 use serde::Serialize;
 use subtle::ConstantTimeEq;
+use tracing::debug;
 
 use crate::{
     config::AppConfig,
@@ -45,6 +46,7 @@ struct HealthResponse {
 struct StatisticsResponse {
     peers: usize,
     swarms: usize,
+    torrents: usize,
     daily_torrents: Vec<DailyTorrentCount>,
     uptime_seconds: u64,
     traffic: crate::metrics::TrafficSnapshot,
@@ -60,13 +62,12 @@ pub fn router(context: AppContext, enable_http_tracker: bool) -> Router {
     let app_metrics = context.metrics.clone();
     let router = Router::new()
         .route("/", get(index))
+        .route("/scrape", get(scrape))
         .route("/stats", get(statistics))
         .route("/metrics", get(metrics))
         .route("/health", get(health));
     let router = if enable_http_tracker {
-        router
-            .route("/announce", get(announce))
-            .route("/scrape", get(scrape))
+        router.route("/announce", get(announce))
     } else {
         router
     };
@@ -80,6 +81,9 @@ async fn observe_traffic(
     request: Request,
     next: Next,
 ) -> Response {
+    let started_at = Instant::now();
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
     let metadata_bytes = request.method().as_str().len()
         + request.uri().to_string().len()
         + request
@@ -114,6 +118,15 @@ async fn observe_traffic(
         }
     };
     metrics.record_traffic("http", ingress_bytes, response_body.len());
+    debug!(
+        %method,
+        %path,
+        status = %parts.status,
+        ingress_bytes,
+        egress_bytes = response_body.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "HTTP request completed"
+    );
     Response::from_parts(parts, Body::from(response_body))
 }
 
@@ -161,12 +174,13 @@ async fn scrape(
 ) -> Result<Response, ApiError> {
     tracker_gate(&context, &headers, remote.ip())?;
     let params = parse_query(query.as_deref().unwrap_or_default())?;
-    let hashes = params
-        .get("info_hash")
-        .ok_or_else(|| ApiError::bad_request("missing info_hash"))?
-        .iter()
-        .map(|value| identifier(value, "info_hash"))
-        .collect::<Result<Vec<_>, _>>()?;
+    let hashes = match params.get("info_hash") {
+        Some(values) => values
+            .iter()
+            .map(|value| identifier(value, "info_hash"))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => context.state.info_hashes(),
+    };
     context.metrics.request("http", "scrape", "ok");
     Ok(bencoded_response(scrape_payload(&context.state, hashes)))
 }
@@ -179,14 +193,16 @@ async fn statistics(
     State(context): State<AppContext>,
 ) -> Result<Json<StatisticsResponse>, ApiError> {
     let swarms = context.state.swarm_count();
+    let torrents = context.state.torrent_count();
     let daily_torrents = context
         .persistence
-        .daily_torrent_counts(swarms)
+        .daily_torrent_counts(torrents)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(StatisticsResponse {
         peers: context.state.peer_count(),
         swarms,
+        torrents,
         daily_torrents,
         uptime_seconds: context.started_at.elapsed().as_secs(),
         traffic: context.metrics.traffic_snapshot(),
@@ -470,7 +486,10 @@ impl IntoResponse for ApiError {
     }
 }
 
-const INDEX_HTML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/static/index.html"));
+const INDEX_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/static/index.html"
+));
 #[cfg(test)]
 mod tests {
     use super::*;

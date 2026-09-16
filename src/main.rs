@@ -12,7 +12,7 @@ use hive_tracker::{
     web::{router, AppContext},
 };
 use tokio::{net::TcpListener, time};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -32,9 +32,9 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = AppConfig::from_file(&cli.config)?;
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(&config.log_filter))
-        .init();
+    let log_filter = EnvFilter::try_new(&config.log_filter)
+        .with_context(|| format!("invalid log_filter: {}", config.log_filter))?;
+    tracing_subscriber::fmt().with_env_filter(log_filter).init();
 
     let protocol = resolve_protocol(cli.protocol, config.default_protocol);
     let state = Arc::new(TrackerState::default());
@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
     persistence.load(&state).await?;
     state.remove_stale(config.peer_timeout);
     persistence
-        .record_daily_torrent_count(state.swarm_count())
+        .record_daily_torrent_count(state.torrent_count())
         .await?;
     let metrics = AppMetrics::new()?;
     metrics.set_population(state.peer_count(), state.swarm_count());
@@ -83,7 +83,13 @@ async fn main() -> Result<()> {
         config.peer_timeout,
     ));
     let traffic_log_task = tokio::spawn(log_traffic(metrics));
-    info!(?protocol, "Hive tracker started");
+    info!(
+        ?protocol,
+        web_addr = %config.http_addr,
+        udp_addr = %config.udp_addr,
+        database = %config.database_path.display(),
+        "Hive tracker started"
+    );
     run_protocols(listener, udp, context, protocol).await?;
 
     persistence_task.abort();
@@ -157,10 +163,18 @@ async fn periodic_maintenance(
     ticker.tick().await;
     loop {
         ticker.tick().await;
+        let peers_before = state.peer_count();
         state.remove_stale(peer_timeout);
         rate_limiter.remove_idle();
         if let Err(error) = persistence.save(&state).await {
             error!(%error, "failed to persist tracker state");
+        } else {
+            debug!(
+                peers = state.peer_count(),
+                removed_peers = peers_before.saturating_sub(state.peer_count()),
+                swarms = state.swarm_count(),
+                "periodic maintenance completed"
+            );
         }
     }
 }

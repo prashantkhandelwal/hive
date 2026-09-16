@@ -4,6 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
@@ -80,9 +81,17 @@ impl TrackerState {
     }
 
     pub fn announce(&self, info_hash: InfoHash, peer: Peer, event: AnnounceEvent) -> SwarmStats {
+        if event != AnnounceEvent::Stopped {
+            self.completed.entry(info_hash).or_default();
+        }
+
         if event == AnnounceEvent::Stopped {
-            if let Some(mut swarm) = self.swarms.get_mut(&info_hash) {
-                swarm.remove(&peer.peer_id);
+            if let Entry::Occupied(mut entry) = self.swarms.entry(info_hash) {
+                entry.get_mut().remove(&peer.peer_id);
+                if entry.get().is_empty() {
+                    entry.remove();
+                    self.completed.remove(&info_hash);
+                }
             }
         } else {
             self.swarms
@@ -138,12 +147,24 @@ impl TrackerState {
             .unwrap_or_default()
     }
 
+    pub fn info_hashes(&self) -> Vec<InfoHash> {
+        let mut hashes: HashSet<_> = self.swarms.iter().map(|swarm| *swarm.key()).collect();
+        hashes.extend(self.completed.iter().map(|entry| *entry.key()));
+        hashes.into_iter().collect()
+    }
+
+    pub fn torrent_count(&self) -> usize {
+        self.info_hashes().len()
+    }
+
     pub fn remove_stale(&self, max_age: Duration) {
         let cutoff = unix_timestamp().saturating_sub(max_age.as_secs());
         self.swarms.retain(|_, swarm| {
             swarm.retain(|_, peer| peer.last_seen >= cutoff);
             !swarm.is_empty()
         });
+        self.completed
+            .retain(|info_hash, _| self.swarms.contains_key(info_hash));
     }
 
     pub fn swarm_count(&self) -> usize {
@@ -196,5 +217,40 @@ mod tests {
             }
         );
         assert_eq!(state.peer_count(), 1);
+
+        state.announce(info_hash, peer(1, 0), AnnounceEvent::Stopped);
+
+        assert_eq!(state.peer_count(), 0);
+        assert_eq!(state.swarm_count(), 0);
+        assert!(state.info_hashes().is_empty());
+        assert_eq!(state.torrent_count(), 0);
+    }
+
+    #[test]
+    fn given_incomplete_torrent_when_last_peer_stops_then_torrent_is_removed() {
+        let state = TrackerState::default();
+        let info_hash = [8; 20];
+
+        state.announce(info_hash, peer(1, 100), AnnounceEvent::Started);
+        state.announce(info_hash, peer(1, 100), AnnounceEvent::Stopped);
+
+        assert_eq!(state.peer_count(), 0);
+        assert_eq!(state.swarm_count(), 0);
+        assert_eq!(state.torrent_count(), 0);
+    }
+
+    #[test]
+    fn given_stale_torrent_when_cleaned_up_then_torrent_is_removed() {
+        let state = TrackerState::default();
+        let info_hash = [9; 20];
+        let mut stale_peer = peer(1, 100);
+        stale_peer.last_seen = 0;
+
+        state.announce(info_hash, stale_peer, AnnounceEvent::Started);
+        state.remove_stale(Duration::from_secs(1));
+
+        assert_eq!(state.peer_count(), 0);
+        assert_eq!(state.swarm_count(), 0);
+        assert_eq!(state.torrent_count(), 0);
     }
 }

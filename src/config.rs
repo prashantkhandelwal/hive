@@ -85,14 +85,16 @@ impl Default for FileConfig {
             http_addr: "0.0.0.0:3000"
                 .parse()
                 .expect("default HTTP address is valid"),
-            udp_addr: "[::]:6969".parse().expect("default UDP address is valid"),
+            udp_addr: "0.0.0.0:6969"
+                .parse()
+                .expect("default UDP address is valid"),
             database_path: PathBuf::from("hive.db"),
             auth_token: None,
             announce_interval: 1800,
             peer_timeout: 3600,
             persistence_interval: 30,
             rate_limit_per_minute: 120,
-            log_filter: "hive_tracker=info".to_owned(),
+            log_filter: "hive_tracker=debug".to_owned(),
         }
     }
 }
@@ -141,6 +143,6 @@ mod tests {
         assert_eq!(config.http_addr, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.peer_timeout, Duration::from_secs(90));
         assert_eq!(config.auth_token.as_deref(), Some("secret"));
-        assert_eq!(config.udp_addr, "[::]:6969".parse().unwrap());
+        assert_eq!(config.udp_addr, "0.0.0.0:6969".parse().unwrap());
     }
 }

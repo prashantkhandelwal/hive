@@ -305,7 +305,7 @@
 
         .grid {
             display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-columns: repeat(3, minmax(0, 1fr));
             border: 1px solid var(--line);
             background: var(--surface)
         }
@@ -320,11 +320,11 @@
             justify-content: space-between
         }
 
-        .metric:nth-child(4n) {
+        .metric:nth-child(3n) {
             border-right: 0
         }
 
-        .metric:nth-last-child(-n+4) {
+        .metric:nth-last-child(-n+3) {
             border-bottom: 0
         }
 
@@ -343,6 +343,70 @@
             text-transform: uppercase;
             letter-spacing: 0;
             color: var(--muted)
+        }
+
+        .label-with-info {
+            display: flex;
+            align-items: center;
+            gap: 7px
+        }
+
+        .metric-info {
+            position: relative;
+            display: inline-grid;
+            place-items: center;
+            width: 18px;
+            height: 18px;
+            padding: 0;
+            border: 1px solid currentColor;
+            border-radius: 50%;
+            background: transparent;
+            color: inherit;
+            font: 700 12px Georgia, serif;
+            line-height: 1;
+            text-transform: none;
+            cursor: help
+        }
+
+        .metric-info:focus-visible {
+            outline: 2px solid var(--gold);
+            outline-offset: 2px
+        }
+
+        .metric-tooltip {
+            position: absolute;
+            z-index: 10;
+            bottom: calc(100% + 10px);
+            left: 50%;
+            width: 230px;
+            padding: 10px 12px;
+            border: 1px solid var(--ink);
+            background: var(--ink);
+            color: white;
+            font: 13px/1.4 "Aptos", "Segoe UI Variable", sans-serif;
+            text-align: left;
+            text-transform: none;
+            visibility: hidden;
+            opacity: 0;
+            transform: translate(-50%, 4px);
+            transition: opacity 120ms ease, transform 120ms ease, visibility 120ms
+        }
+
+        .metric-tooltip::after {
+            content: "";
+            position: absolute;
+            top: 100%;
+            left: 50%;
+            border: 6px solid transparent;
+            border-top-color: var(--ink);
+            transform: translateX(-50%)
+        }
+
+        .metric-info:hover .metric-tooltip,
+        .metric-info:focus .metric-tooltip {
+            visibility: visible;
+            opacity: 1;
+            transform: translate(-50%, 0)
         }
 
         .primary .label,
@@ -427,19 +491,21 @@
                 grid-template-columns: repeat(2, minmax(0, 1fr))
             }
 
+            .metric:nth-child(3n) {
+                border-right: 1px solid var(--line)
+            }
+
             .metric:nth-child(2n) {
                 border-right: 0
             }
 
-            .metric:nth-child(4n) {
-                border-right: 0
-            }
-
-            .metric:nth-last-child(-n+4) {
+            .metric:nth-last-child(-n+3) {
                 border-bottom: 1px solid var(--line)
             }
 
-            .metric:nth-last-child(-n+2) {
+            .metric:last-child {
+                grid-column: 1 / -1;
+                border-right: 0;
                 border-bottom: 0
             }
         }
@@ -576,12 +642,26 @@
                     <div class="value" id="uptime">-</div>
                 </div>
                 <div class="metric">
-                    <div class="label">Active peers</div>
+                    <div class="label label-with-info">Active peers
+                        <button class="metric-info" type="button" aria-label="About active peers"
+                            aria-describedby="activePeersTooltip">i<span class="metric-tooltip" id="activePeersTooltip"
+                                role="tooltip">Torrent clients that announced recently and have not stopped or timed
+                                out.</span></button>
+                    </div>
                     <div class="value" id="peers">-</div>
                 </div>
                 <div class="metric">
-                    <div class="label">Tracked swarms</div>
+                    <div class="label label-with-info">Tracked swarms
+                        <button class="metric-info" type="button" aria-label="About tracked swarms"
+                            aria-describedby="trackedSwarmsTooltip">i<span class="metric-tooltip"
+                                id="trackedSwarmsTooltip" role="tooltip">Unique torrents that currently have at least
+                                one active peer.</span></button>
+                    </div>
                     <div class="value" id="swarms">-</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Total torrents</div>
+                    <div class="value" id="torrents">-</div>
                 </div>
                 <div class="metric">
                     <div class="label">Ingress / minute</div>
@@ -697,7 +777,7 @@
         function drawBarChart() { const frame = chartFrame('torrentChart'), values = torrentHistory.map(count => count.torrents); if (!torrentHistory.length) { frame.svg.innerHTML = ''; byId('torrentChartEmpty').hidden = false; return } byId('torrentChartEmpty').hidden = true; const max = Math.max(4, ...values), slot = frame.plotWidth / values.length, barWidth = Math.max(2, Math.min(52, slot * .68)); let content = ''; for (let step = 0; step <= 4; step++) { const y = frame.top + frame.plotHeight * step / 4, label = Math.ceil(max * (1 - step / 4)); content += `<line class="grid-line" x1="${frame.left}" y1="${y}" x2="${frame.left + frame.plotWidth}" y2="${y}"/><text class="axis-label" x="${frame.left - 8}" y="${y + 4}" text-anchor="end">${label}</text>` } values.forEach((value, index) => { const height = value / max * frame.plotHeight, x = frame.left + index * slot + (slot - barWidth) / 2, y = frame.top + frame.plotHeight - height; content += `<rect class="bar torrents" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${height.toFixed(1)}"/>` }); frame.svg.innerHTML = content + dayLabels(frame) }
         function drawTrafficChart() { const frame = chartFrame('trafficChart', 38); if (samples.length < 2) { frame.svg.innerHTML = ''; byId('trafficChartEmpty').hidden = false; return } byId('trafficChartEmpty').hidden = true; const ingress = samples.map(sample => sample.ingress), egress = samples.map(sample => sample.egress), requests = samples.map(sample => sample.requests), maxBytes = Math.max(1, ...ingress, ...egress), maxRequests = Math.max(4, ...requests); let content = ''; for (let step = 0; step <= 4; step++) { const y = frame.top + frame.plotHeight * step / 4, byteLabel = bytes(Math.round(maxBytes * (1 - step / 4))), requestLabel = Math.ceil(maxRequests * (1 - step / 4)); content += `<line class="grid-line" x1="${frame.left}" y1="${y}" x2="${frame.left + frame.plotWidth}" y2="${y}"/><text class="axis-label" x="${frame.left - 8}" y="${y + 4}" text-anchor="end">${byteLabel}</text><text class="axis-label" x="${frame.left + frame.plotWidth + 8}" y="${y + 4}">${requestLabel}</text>` } content += `<path class="line ingress" d="${pathFor(ingress, maxBytes, frame.plotWidth, frame.plotHeight, frame.left, frame.top)}"/><path class="line egress" d="${pathFor(egress, maxBytes, frame.plotWidth, frame.plotHeight, frame.left, frame.top)}"/><path class="line requests" d="${pathFor(requests, maxRequests, frame.plotWidth, frame.plotHeight, frame.left, frame.top)}"/>`; frame.svg.innerHTML = content + timeLabels(frame) }
         function drawCharts() { drawTrafficChart(); drawSharedChart('protocolChart', 'protocolChartEmpty', [{ name: 'http', values: samples.map(sample => sample.httpRequests) }, { name: 'udp', values: samples.map(sample => sample.udpRequests) }]); drawSharedChart('populationChart', 'populationChartEmpty', [{ name: 'peers', values: samples.map(sample => sample.peers) }, { name: 'swarms', values: samples.map(sample => sample.swarms) }]); drawBarChart() }
-        async function refresh() { try { const response = await fetch('/stats', { cache: 'no-store' }); if (!response.ok) throw new Error('status unavailable'); const stats = await response.json(), traffic = stats.traffic, http = traffic.http, udp = traffic.udp, ingressRate = http.ingress_bytes + udp.ingress_bytes, egressRate = http.egress_bytes + udp.egress_bytes, rpm = http.requests_per_minute + udp.requests_per_minute; torrentHistory = stats.daily_torrents; byId('peers').textContent = stats.peers; byId('swarms').textContent = stats.swarms; byId('uptime').textContent = duration(stats.uptime_seconds); byId('ingress').textContent = bytes(traffic.total_ingress_bytes); byId('egress').textContent = bytes(traffic.total_egress_bytes); byId('rpm').textContent = rpm; byId('ingressRate').textContent = bytes(ingressRate); byId('egressRate').textContent = bytes(egressRate); byId('httpRpm').textContent = http.requests_per_minute + ' rpm'; byId('udpRpm').textContent = udp.requests_per_minute + ' rpm'; byId('httpFlow').textContent = bytes(http.ingress_bytes) + ' in / ' + bytes(http.egress_bytes) + ' out'; byId('udpFlow').textContent = bytes(udp.ingress_bytes) + ' in / ' + bytes(udp.egress_bytes) + ' out'; byId('chartIngress').textContent = bytes(ingressRate); byId('chartEgress').textContent = bytes(egressRate); byId('chartRequests').textContent = rpm; byId('chartHttp').textContent = http.requests_per_minute; byId('chartUdp').textContent = udp.requests_per_minute; byId('chartPeers').textContent = stats.peers; byId('chartSwarms').textContent = stats.swarms; byId('chartTorrents').textContent = stats.swarms; samples.push({ time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), ingress: ingressRate, egress: egressRate, requests: rpm, httpRequests: http.requests_per_minute, udpRequests: udp.requests_per_minute, peers: stats.peers, swarms: stats.swarms }); if (samples.length > 60) samples.shift(); if (!byId('chartView').hidden) drawCharts(); byId('updated').textContent = 'Updated ' + new Date().toLocaleTimeString(); byId('status').textContent = 'Online'; byId('status').className = '' } catch (error) { byId('status').textContent = 'Unavailable'; byId('status').className = 'error'; byId('updated').textContent = 'Refresh failed' } }
+        async function refresh() { try { const response = await fetch('/stats', { cache: 'no-store' }); if (!response.ok) throw new Error('status unavailable'); const stats = await response.json(), traffic = stats.traffic, http = traffic.http, udp = traffic.udp, ingressRate = http.ingress_bytes + udp.ingress_bytes, egressRate = http.egress_bytes + udp.egress_bytes, rpm = http.requests_per_minute + udp.requests_per_minute; torrentHistory = stats.daily_torrents; byId('peers').textContent = stats.peers; byId('swarms').textContent = stats.swarms; byId('torrents').textContent = stats.torrents; byId('uptime').textContent = duration(stats.uptime_seconds); byId('ingress').textContent = bytes(traffic.total_ingress_bytes); byId('egress').textContent = bytes(traffic.total_egress_bytes); byId('rpm').textContent = rpm; byId('ingressRate').textContent = bytes(ingressRate); byId('egressRate').textContent = bytes(egressRate); byId('httpRpm').textContent = http.requests_per_minute + ' rpm'; byId('udpRpm').textContent = udp.requests_per_minute + ' rpm'; byId('httpFlow').textContent = bytes(http.ingress_bytes) + ' in / ' + bytes(http.egress_bytes) + ' out'; byId('udpFlow').textContent = bytes(udp.ingress_bytes) + ' in / ' + bytes(udp.egress_bytes) + ' out'; byId('chartIngress').textContent = bytes(ingressRate); byId('chartEgress').textContent = bytes(egressRate); byId('chartRequests').textContent = rpm; byId('chartHttp').textContent = http.requests_per_minute; byId('chartUdp').textContent = udp.requests_per_minute; byId('chartPeers').textContent = stats.peers; byId('chartSwarms').textContent = stats.swarms; byId('chartTorrents').textContent = stats.torrents; samples.push({ time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), ingress: ingressRate, egress: egressRate, requests: rpm, httpRequests: http.requests_per_minute, udpRequests: udp.requests_per_minute, peers: stats.peers, swarms: stats.swarms }); if (samples.length > 60) samples.shift(); if (!byId('chartView').hidden) drawCharts(); byId('updated').textContent = 'Updated ' + new Date().toLocaleTimeString(); byId('status').textContent = 'Online'; byId('status').className = '' } catch (error) { byId('status').textContent = 'Unavailable'; byId('status').className = 'error'; byId('updated').textContent = 'Refresh failed' } }
         addEventListener('resize', () => { if (!byId('chartView').hidden) drawCharts() });
         refresh(); setInterval(refresh, 5000);
     </script>

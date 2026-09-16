@@ -175,7 +175,8 @@ impl Persistence {
             }
         }
         transaction.commit().await?;
-        self.record_daily_torrent_count(state.swarm_count()).await?;
+        self.record_daily_torrent_count(state.torrent_count())
+            .await?;
         Ok(())
     }
 

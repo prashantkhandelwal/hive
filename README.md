@@ -7,7 +7,7 @@ peer and completion data across restarts.
 The service exposes:
 
 * `GET /announce` for compact HTTP announces
-* `GET /scrape` for one or more repeated `info_hash` parameters
+* `GET /scrape` for all torrents or one or more repeated `info_hash` parameters
 * `GET /health` for database-aware health checks
 * `GET /stats` for aggregate JSON statistics
 * `GET /metrics` for Prometheus text exposition
@@ -39,8 +39,8 @@ configured.
 
 Open `http://localhost:3000` for the dashboard. The default SQLite database is
 created as `hive.db` in the working directory. The dashboard remains available
-when `udp` is selected; in that mode, HTTP announce and scrape routes are not
-enabled.
+when `udp` is selected; in that mode, the read-only HTTP scrape route remains
+available while HTTP announces are disabled.
 
 ## Configuration
 
@@ -50,17 +50,21 @@ Hive reads configuration from `hive.toml` in the working directory.
 | --- | --- | --- |
 | `default_protocol` | `both` | Listener mode: `http`, `udp`, or `both` |
 | `http_addr` | `0.0.0.0:3000` | Web UI and HTTP tracker listen address |
-| `udp_addr` | `[::]:6969` | UDP listen address |
+| `udp_addr` | `0.0.0.0:6969` | UDP tracker listen address |
 | `database_path` | `hive.db` | SQLite database path |
 | `auth_token` | Unset | Optional HTTP bearer token |
 | `announce_interval` | `1800` | Client reannounce interval in seconds |
 | `peer_timeout` | `3600` | Maximum idle peer age in seconds |
 | `persistence_interval` | `30` | Snapshot interval in seconds |
 | `rate_limit_per_minute` | `120` | Per-source-IP request allowance |
-| `log_filter` | `hive_tracker=info` | Tracing filter |
+| `log_filter` | `hive_tracker=debug` | Tracing filter and verbosity |
 
 Use `--config path/to/config.toml` to load another file. The `--protocol`
 command-line argument overrides `default_protocol` for the current process.
+
+Set `log_filter` to a tracing directive such as `hive_tracker=trace` for maximum
+detail or `hive_tracker=info` for quieter operational logs. Multiple directives
+can be comma-separated.
 
 When `auth_token` is set, `/announce`, `/scrape`, and `/metrics` require
 the following header:
@@ -85,6 +89,9 @@ udp://tracker.example.com:6969/announce
 HTTP requests must percent-encode the raw 20-byte `info_hash` and `peer_id`.
 Responses use compact peer encoding appropriate to the requesting address
 family.
+
+Calling `/scrape` without an `info_hash` returns a full scrape. To request only
+specific torrents, repeat the percent-encoded `info_hash` query parameter.
 
 ## Verification
 
