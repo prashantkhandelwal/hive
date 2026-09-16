@@ -51,7 +51,7 @@ impl RateLimiter {
     pub fn remove_idle(&self) {
         self.buckets.retain(|_, bucket| {
             bucket
-                .lock()
+                .get_mut()
                 .map(|value| value.updated_at.elapsed() < Duration::from_secs(300))
                 .unwrap_or(false)
         });

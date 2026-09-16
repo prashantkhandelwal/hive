@@ -1,9 +1,40 @@
 use std::{env, net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
+use clap::ValueEnum;
+use thiserror::Error;
+
+#[derive(Debug, Error, PartialEq)]
+#[error("expected http, udp, or both; got {value}")]
+pub struct ProtocolParseError {
+    value: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum Protocol {
+    Http,
+    Udp,
+    Both,
+}
+
+impl std::str::FromStr for Protocol {
+    type Err = ProtocolParseError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "http" => Ok(Self::Http),
+            "udp" => Ok(Self::Udp),
+            "both" => Ok(Self::Both),
+            _ => Err(ProtocolParseError {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
+    pub default_protocol: Protocol,
     pub http_addr: SocketAddr,
     pub udp_addr: SocketAddr,
     pub database_path: PathBuf,
@@ -17,6 +48,7 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
+            default_protocol: parse_env("HIVE_DEFAULT_PROTOCOL", "both")?,
             http_addr: parse_env("HIVE_HTTP_ADDR", "[::]:3000")?,
             udp_addr: parse_env("HIVE_UDP_ADDR", "[::]:6969")?,
             database_path: env::var_os("HIVE_DATABASE_PATH")
@@ -45,4 +77,16 @@ where
         .unwrap_or_else(|_| default.to_owned())
         .parse()
         .with_context(|| format!("invalid value for {name}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn given_mixed_case_protocol_when_parsed_then_expected_variant_is_returned() {
+        let protocol = "HtTp".parse::<Protocol>();
+
+        assert_eq!(protocol, Ok(Protocol::Http));
+    }
 }

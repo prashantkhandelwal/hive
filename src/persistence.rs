@@ -3,7 +3,7 @@ use std::{net::IpAddr, path::Path, str::FromStr};
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use thiserror::Error;
 
-use crate::state::{InfoHash, Peer, PeerId, TrackerState};
+use crate::state::{Peer, PeerId, TrackerState};
 
 pub type Result<T> = std::result::Result<T, PersistenceError>;
 

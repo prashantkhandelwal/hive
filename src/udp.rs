@@ -14,7 +14,7 @@ use crate::{
     state::{unix_timestamp, AnnounceEvent, Peer, TrackerState},
 };
 
-const PROTOCOL_ID: u64 = 0x4172_7101_980;
+const PROTOCOL_ID: u64 = 0x0417_2710_1980;
 const ACTION_CONNECT: u32 = 0;
 const ACTION_ANNOUNCE: u32 = 1;
 const ACTION_SCRAPE: u32 = 2;
@@ -149,7 +149,7 @@ impl UdpTracker {
 
     fn scrape(&self, packet: &[u8], remote: SocketAddr, transaction_id: u32) -> Vec<u8> {
         if packet.len() < 36
-            || (packet.len() - 16) % 20 != 0
+            || !(packet.len() - 16).is_multiple_of(20)
             || !self.valid_connection(packet, remote.ip())
         {
             self.metrics.request("udp", "scrape", "invalid");
@@ -158,11 +158,9 @@ impl UdpTracker {
         let mut response = Vec::with_capacity(8 + ((packet.len() - 16) / 20) * 12);
         push_u32(&mut response, ACTION_SCRAPE);
         push_u32(&mut response, transaction_id);
-        for chunk in packet[16..].chunks_exact(20) {
-            let Some(info_hash) = chunk.try_into().ok() else {
-                continue;
-            };
-            let stats = self.state.stats(&info_hash);
+        let (info_hashes, _) = packet[16..].as_chunks::<20>();
+        for info_hash in info_hashes {
+            let stats = self.state.stats(info_hash);
             push_u32(&mut response, stats.complete as u32);
             push_u32(&mut response, stats.downloaded as u32);
             push_u32(&mut response, stats.incomplete as u32);

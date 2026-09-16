@@ -32,6 +32,17 @@ Install the Rust toolchain and the platform linker, then run:
 cargo run --release
 ```
 
+Select one listener with `--protocol`, or use `both` explicitly:
+
+```powershell
+cargo run --release -- --protocol http
+cargo run --release -- --protocol udp
+cargo run --release -- --protocol both
+```
+
+Without `--protocol`, Hive uses `HIVE_DEFAULT_PROTOCOL`. Its default value is
+`both`, so the HTTP and UDP listeners run when neither option is configured.
+
 Open `http://localhost:3000` for the dashboard. The default SQLite database is
 created as `hive.db` in the working directory.
 
@@ -41,6 +52,7 @@ Hive reads configuration from environment variables.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `HIVE_DEFAULT_PROTOCOL` | `both` | Listener mode: `http`, `udp`, or `both` |
 | `HIVE_HTTP_ADDR` | `[::]:3000` | HTTP listen address |
 | `HIVE_UDP_ADDR` | `[::]:6969` | UDP listen address |
 | `HIVE_DATABASE_PATH` | `hive.db` | SQLite database path |
@@ -50,6 +62,9 @@ Hive reads configuration from environment variables.
 | `HIVE_PERSISTENCE_INTERVAL` | `30` | Snapshot interval in seconds |
 | `HIVE_RATE_LIMIT_PER_MINUTE` | `120` | Per-source-IP request allowance |
 | `RUST_LOG` | `hive_tracker=info` | Tracing filter |
+
+The `--protocol` command-line argument overrides `HIVE_DEFAULT_PROTOCOL` for the
+current process.
 
 When `HIVE_AUTH_TOKEN` is set, `/announce`, `/scrape`, and `/metrics` require
 the following header:

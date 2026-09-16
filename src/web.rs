@@ -47,6 +47,7 @@ struct StatisticsResponse {
     uptime_seconds: u64,
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     message: String,

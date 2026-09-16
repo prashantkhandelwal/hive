@@ -1,8 +1,9 @@
 use std::{sync::Arc, time::Instant};
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use hive_tracker::{
-    config::AppConfig,
+    config::{AppConfig, Protocol},
     metrics::AppMetrics,
     persistence::Persistence,
     rate_limit::RateLimiter,
@@ -14,6 +15,16 @@ use tokio::{net::TcpListener, time};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "hive-tracker",
+    about = "Minimal HTTP and UDP BitTorrent tracker"
+)]
+struct Cli {
+    #[arg(long, value_enum, help = "Protocol listener to run")]
+    protocol: Option<Protocol>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -23,7 +34,9 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let cli = Cli::parse();
     let config = AppConfig::from_env()?;
+    let protocol = resolve_protocol(cli.protocol, config.default_protocol);
     let state = Arc::new(TrackerState::default());
     let persistence = Persistence::open(&config.database_path).await?;
     persistence.load(&state).await?;
@@ -40,18 +53,30 @@ async fn main() -> Result<()> {
         rate_limiter: Arc::clone(&rate_limiter),
         started_at: Instant::now(),
     };
-    let listener = TcpListener::bind(config.http_addr)
-        .await
-        .with_context(|| format!("failed to bind HTTP listener at {}", config.http_addr))?;
-    let udp = UdpTracker::bind(
-        config.udp_addr,
-        Arc::clone(&state),
-        metrics,
-        Arc::clone(&rate_limiter),
-        config.announce_interval,
-    )
-    .await
-    .with_context(|| format!("failed to bind UDP listener at {}", config.udp_addr))?;
+    let listener = if matches!(protocol, Protocol::Http | Protocol::Both) {
+        Some(
+            TcpListener::bind(config.http_addr)
+                .await
+                .with_context(|| format!("failed to bind HTTP listener at {}", config.http_addr))?,
+        )
+    } else {
+        None
+    };
+    let udp = if matches!(protocol, Protocol::Udp | Protocol::Both) {
+        Some(
+            UdpTracker::bind(
+                config.udp_addr,
+                Arc::clone(&state),
+                metrics,
+                Arc::clone(&rate_limiter),
+                config.announce_interval,
+            )
+            .await
+            .with_context(|| format!("failed to bind UDP listener at {}", config.udp_addr))?,
+        )
+    } else {
+        None
+    };
 
     let persistence_task = tokio::spawn(periodic_maintenance(
         persistence.clone(),
@@ -60,22 +85,47 @@ async fn main() -> Result<()> {
         config.persistence_interval,
         config.peer_timeout,
     ));
-    info!(http = %config.http_addr, udp = %config.udp_addr, "Hive tracker started");
-
-    let http_server = axum::serve(
-        listener,
-        router(context).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal());
-    tokio::select! {
-        result = http_server => result.context("HTTP server failed")?,
-        result = udp.run() => result.context("UDP server failed")?,
-    }
+    info!(?protocol, "Hive tracker started");
+    run_protocols(listener, udp, context).await?;
 
     persistence_task.abort();
     persistence.save(&state).await?;
     info!("Hive tracker stopped");
     Ok(())
+}
+
+fn resolve_protocol(command_line: Option<Protocol>, configured: Protocol) -> Protocol {
+    command_line.unwrap_or(configured)
+}
+
+async fn run_protocols(
+    listener: Option<TcpListener>,
+    udp: Option<UdpTracker>,
+    context: AppContext,
+) -> Result<()> {
+    let http_server = async {
+        let Some(listener) = listener else {
+            return std::future::pending::<Result<()>>().await;
+        };
+        axum::serve(
+            listener,
+            router(context).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .context("HTTP server failed")
+    };
+    let udp_server = async {
+        let Some(udp) = udp else {
+            return std::future::pending::<Result<()>>().await;
+        };
+        udp.run().await.context("UDP server failed")
+    };
+
+    tokio::select! {
+        result = http_server => result,
+        result = udp_server => result,
+        _ = shutdown_signal() => Ok(()),
+    }
 }
 
 async fn periodic_maintenance(
@@ -100,5 +150,24 @@ async fn periodic_maintenance(
 async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
         error!(%error, "failed to install shutdown signal handler");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn given_cli_protocol_when_resolved_then_it_overrides_configuration() {
+        let protocol = resolve_protocol(Some(Protocol::Udp), Protocol::Http);
+
+        assert_eq!(protocol, Protocol::Udp);
+    }
+
+    #[test]
+    fn given_no_cli_protocol_when_resolved_then_configuration_is_used() {
+        let protocol = resolve_protocol(None, Protocol::Both);
+
+        assert_eq!(protocol, Protocol::Both);
     }
 }
