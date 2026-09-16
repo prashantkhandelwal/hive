@@ -1,10 +1,3 @@
----
-title: Hive Torrent Tracker
-description: Minimal BitTorrent tracker with HTTP, UDP, SQLite, metrics, and an operational dashboard
-ms.date: 2026-09-16
-ms.topic: overview
----
-
 ## Overview
 
 Hive is a compact BitTorrent tracker written in Rust. A shared DashMap-backed

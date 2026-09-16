@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Hive Tracker</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --ink: #17211d;
+            --paper: #f3f1e9;
+            --surface: #fffefa;
+            --green: #176447;
+            --coral: #c85d46;
+            --gold: #d39b25;
+            --blue: #32658a;
+            --line: #c9c6b9;
+            --muted: #626a65
+        }
+
+        * {
+            box-sizing: border-box
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background-color: var(--paper);
+            background-image: linear-gradient(90deg, rgba(23, 100, 71, .045) 1px, transparent 1px), linear-gradient(rgba(23, 100, 71, .045) 1px, transparent 1px);
+            background-size: 32px 32px;
+            color: var(--ink);
+            font-family: "Aptos", "Segoe UI Variable", sans-serif
+        }
+
+        header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--line);
+            padding: 18px max(24px, 5vw);
+            display: flex;
+            align-items: center;
+            justify-content: space-between
+        }
+
+        .brand {
+            display: flex;
+            align-items: baseline;
+            gap: 12px
+        }
+
+        h1 {
+            font-family: Georgia, serif;
+            font-size: 30px;
+            margin: 0;
+            letter-spacing: 0
+        }
+
+        .tag {
+            color: var(--muted);
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0
+        }
+
+        .status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 650
+        }
+
+        .dot {
+            width: 9px;
+            height: 9px;
+            background: var(--green);
+            border-radius: 50%;
+            box-shadow: 0 0 0 4px rgba(23, 100, 71, .12)
+        }
+
+        main {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 56px 24px 40px
+        }
+
+        .heading {
+            display: flex;
+            align-items: end;
+            justify-content: space-between;
+            gap: 24px;
+            margin-bottom: 22px
+        }
+
+        .heading-tools {
+            display: flex;
+            align-items: center;
+            gap: 18px
+        }
+
+        h2 {
+            font-family: Georgia, serif;
+            font-size: 34px;
+            font-weight: 500;
+            margin: 0;
+            letter-spacing: 0
+        }
+
+        .updated {
+            color: var(--muted);
+            font-size: 14px
+        }
+
+        .view-toggle {
+            display: inline-flex;
+            border: 1px solid var(--line);
+            background: var(--surface);
+            padding: 3px
+        }
+
+        .view-toggle button {
+            border: 0;
+            background: transparent;
+            color: var(--muted);
+            font: inherit;
+            font-size: 13px;
+            font-weight: 650;
+            padding: 8px 13px;
+            cursor: pointer
+        }
+
+        .view-toggle button[aria-selected="true"] {
+            background: var(--ink);
+            color: white
+        }
+
+        .view-toggle button:focus-visible {
+            outline: 2px solid var(--gold);
+            outline-offset: 2px
+        }
+
+        .view[hidden] {
+            display: none
+        }
+
+        .chart-stack {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 22px
+        }
+
+        .chart-panel {
+            border: 1px solid var(--line);
+            background: var(--surface);
+            padding: 24px
+        }
+
+        .chart-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 24px;
+            margin-bottom: 20px
+        }
+
+        .chart-title {
+            font-family: Georgia, serif;
+            font-size: 24px
+        }
+
+        .chart-subtitle {
+            color: var(--muted);
+            font-size: 13px;
+            margin-top: 5px
+        }
+
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 14px 20px
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 13px;
+            color: var(--muted)
+        }
+
+        .swatch {
+            width: 18px;
+            height: 3px
+        }
+
+        .swatch.ingress,
+        .swatch.peers {
+            background: var(--green)
+        }
+
+        .swatch.egress,
+        .swatch.swarms,
+        .swatch.torrents {
+            background: var(--coral)
+        }
+
+        .swatch.requests,
+        .swatch.http {
+            background: var(--gold)
+        }
+
+        .swatch.udp {
+            background: var(--blue)
+        }
+
+        .chart-wrap {
+            position: relative;
+            width: 100%;
+            height: 330px
+        }
+
+        .chart-wrap svg {
+            display: block;
+            width: 100%;
+            height: 100%;
+            overflow: visible
+        }
+
+        .grid-line {
+            stroke: var(--line);
+            stroke-width: 1
+        }
+
+        .axis-label {
+            fill: var(--muted);
+            font: 12px "Aptos", "Segoe UI Variable", sans-serif
+        }
+
+        .line {
+            fill: none;
+            stroke-width: 3;
+            stroke-linecap: round;
+            stroke-linejoin: round
+        }
+
+        .line.ingress,
+        .line.peers {
+            stroke: var(--green)
+        }
+
+        .line.egress,
+        .line.swarms {
+            stroke: var(--coral)
+        }
+
+        .line.requests,
+        .line.http {
+            stroke: var(--gold)
+        }
+
+        .line.udp {
+            stroke: var(--blue)
+        }
+
+        .bar.torrents {
+            fill: var(--coral)
+        }
+
+        .chart-empty {
+            position: absolute;
+            inset: 0;
+            display: grid;
+            place-items: center;
+            color: var(--muted);
+            font-size: 14px
+        }
+
+        .chart-empty[hidden] {
+            display: none
+        }
+
+        .chart-summary {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            border-top: 1px solid var(--line);
+            margin-top: 18px;
+            padding-top: 18px;
+            gap: 18px
+        }
+
+        .chart-summary.two {
+            grid-template-columns: repeat(2, 1fr)
+        }
+
+        .chart-stat {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            font-size: 13px
+        }
+
+        .chart-stat span:first-child {
+            color: var(--muted)
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            border: 1px solid var(--line);
+            background: var(--surface)
+        }
+
+        .metric {
+            min-height: 150px;
+            padding: 24px;
+            border-right: 1px solid var(--line);
+            border-bottom: 1px solid var(--line);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between
+        }
+
+        .metric:nth-child(4n) {
+            border-right: 0
+        }
+
+        .metric:nth-last-child(-n+4) {
+            border-bottom: 0
+        }
+
+        .metric.primary {
+            background: var(--green);
+            color: white
+        }
+
+        .metric.egress {
+            background: var(--coral);
+            color: white
+        }
+
+        .label {
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0;
+            color: var(--muted)
+        }
+
+        .primary .label,
+        .egress .label {
+            color: rgba(255, 255, 255, .78)
+        }
+
+        .value {
+            font-family: Georgia, serif;
+            font-size: 38px;
+            line-height: 1;
+            white-space: nowrap
+        }
+
+        .unit {
+            font-family: "Aptos", "Segoe UI Variable", sans-serif;
+            font-size: 14px;
+            margin-left: 5px;
+            color: var(--muted)
+        }
+
+        .primary .unit,
+        .egress .unit {
+            color: rgba(255, 255, 255, .78)
+        }
+
+        .protocols {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            margin-top: 22px;
+            border: 1px solid var(--line);
+            background: var(--surface)
+        }
+
+        .protocol {
+            padding: 22px 24px;
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 8px 24px
+        }
+
+        .protocol:first-child {
+            border-right: 1px solid var(--line)
+        }
+
+        .protocol-name {
+            font-weight: 700
+        }
+
+        .protocol-rate {
+            font-family: Georgia, serif;
+            font-size: 25px
+        }
+
+        .protocol-flow {
+            grid-column: 1/-1;
+            color: var(--muted);
+            font-size: 13px
+        }
+
+        footer {
+            display: flex;
+            justify-content: space-between;
+            gap: 20px;
+            margin-top: 22px;
+            color: var(--muted);
+            font-size: 13px
+        }
+
+        .error {
+            color: var(--coral)
+        }
+
+        @media(max-width:900px) {
+            .chart-stack {
+                grid-template-columns: 1fr
+            }
+        }
+
+        @media(max-width:800px) {
+            .grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr))
+            }
+
+            .metric:nth-child(2n) {
+                border-right: 0
+            }
+
+            .metric:nth-child(4n) {
+                border-right: 0
+            }
+
+            .metric:nth-last-child(-n+4) {
+                border-bottom: 1px solid var(--line)
+            }
+
+            .metric:nth-last-child(-n+2) {
+                border-bottom: 0
+            }
+        }
+
+        @media(max-width:560px) {
+            header {
+                align-items: flex-start
+            }
+
+            .tag {
+                display: none
+            }
+
+            main {
+                padding-top: 36px
+            }
+
+            .heading {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 14px
+            }
+
+            .heading-tools {
+                width: 100%;
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 12px
+            }
+
+            .view-toggle {
+                width: 100%
+            }
+
+            .view-toggle button {
+                flex: 1
+            }
+
+            h2 {
+                font-size: 29px
+            }
+
+            .grid,
+            .protocols {
+                grid-template-columns: 1fr
+            }
+
+            .metric {
+                min-height: 125px;
+                border-right: 0 !important;
+                border-bottom: 1px solid var(--line) !important
+            }
+
+            .metric:last-child {
+                border-bottom: 0 !important
+            }
+
+            .protocol:first-child {
+                border-right: 0;
+                border-bottom: 1px solid var(--line)
+            }
+
+            .chart-panel {
+                padding: 18px 14px
+            }
+
+            .chart-header {
+                flex-direction: column
+            }
+
+            .legend {
+                justify-content: flex-start
+            }
+
+            .chart-wrap {
+                height: 280px
+            }
+
+            .chart-summary {
+                grid-template-columns: 1fr
+            }
+
+            .chart-stat {
+                border-bottom: 1px solid var(--line);
+                padding-bottom: 10px
+            }
+
+            .chart-stat:last-child {
+                border: 0;
+                padding-bottom: 0
+            }
+
+            footer {
+                flex-direction: column
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div class="brand">
+            <h1>Hive</h1><span class="tag">Tracker telemetry</span>
+        </div>
+        <div class="status"><span class="dot"></span><span id="status">Online</span></div>
+    </header>
+    <main>
+        <div class="heading">
+            <h2>Live traffic</h2>
+            <div class="heading-tools">
+                <div class="view-toggle" role="tablist" aria-label="Metrics view"><button id="overviewTab" type="button"
+                        role="tab" aria-selected="true" aria-controls="overviewView">Overview</button><button
+                        id="chartTab" type="button" role="tab" aria-selected="false"
+                        aria-controls="chartView">Chart</button></div>
+                <div class="updated" id="updated">Connecting</div>
+            </div>
+        </div>
+        <section class="view" id="overviewView" role="tabpanel" aria-labelledby="overviewTab">
+            <div class="grid">
+                <div class="metric primary">
+                    <div class="label">Ingress total</div>
+                    <div class="value" id="ingress">-</div>
+                </div>
+                <div class="metric egress">
+                    <div class="label">Egress total</div>
+                    <div class="value" id="egress">-</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Requests / minute</div>
+                    <div class="value" id="rpm">-</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Uptime</div>
+                    <div class="value" id="uptime">-</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Active peers</div>
+                    <div class="value" id="peers">-</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Tracked swarms</div>
+                    <div class="value" id="swarms">-</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Ingress / minute</div>
+                    <div class="value" id="ingressRate">-</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Egress / minute</div>
+                    <div class="value" id="egressRate">-</div>
+                </div>
+            </div>
+            <div class="protocols">
+                <div class="protocol"><span class="protocol-name">HTTP</span><span class="protocol-rate" id="httpRpm">-
+                        rpm</span><span class="protocol-flow" id="httpFlow">-</span></div>
+                <div class="protocol"><span class="protocol-name">UDP</span><span class="protocol-rate" id="udpRpm">-
+                        rpm</span><span class="protocol-flow" id="udpFlow">-</span></div>
+            </div>
+        </section>
+        <section class="view" id="chartView" role="tabpanel" aria-labelledby="chartTab" hidden>
+            <div class="chart-stack">
+                <div class="chart-panel">
+                    <div class="chart-header">
+                        <div>
+                            <div class="chart-title">Traffic history</div>
+                            <div class="chart-subtitle">Five-minute rolling display sampled every five seconds</div>
+                        </div>
+                        <div class="legend"><span class="legend-item"><i class="swatch ingress"></i>Ingress /
+                                min</span><span class="legend-item"><i class="swatch egress"></i>Egress /
+                                min</span><span class="legend-item"><i class="swatch requests"></i>Requests / min</span>
+                        </div>
+                    </div>
+                    <div class="chart-wrap"><svg id="trafficChart" role="img"
+                            aria-label="Line chart of ingress bytes, egress bytes, and requests per minute"></svg>
+                        <div class="chart-empty" id="trafficChartEmpty">Collecting samples</div>
+                    </div>
+                    <div class="chart-summary">
+                        <div class="chart-stat"><span>Ingress / min</span><strong id="chartIngress">-</strong></div>
+                        <div class="chart-stat"><span>Egress / min</span><strong id="chartEgress">-</strong></div>
+                        <div class="chart-stat"><span>Requests / min</span><strong id="chartRequests">-</strong></div>
+                    </div>
+                </div>
+                <div class="chart-panel">
+                    <div class="chart-header">
+                        <div>
+                            <div class="chart-title">Protocol activity</div>
+                            <div class="chart-subtitle">Requests handled by each tracker protocol</div>
+                        </div>
+                        <div class="legend"><span class="legend-item"><i class="swatch http"></i>HTTP RPM</span><span
+                                class="legend-item"><i class="swatch udp"></i>UDP RPM</span></div>
+                    </div>
+                    <div class="chart-wrap"><svg id="protocolChart" role="img"
+                            aria-label="Line chart of HTTP and UDP requests per minute"></svg>
+                        <div class="chart-empty" id="protocolChartEmpty">Collecting samples</div>
+                    </div>
+                    <div class="chart-summary two">
+                        <div class="chart-stat"><span>HTTP requests / min</span><strong id="chartHttp">-</strong></div>
+                        <div class="chart-stat"><span>UDP requests / min</span><strong id="chartUdp">-</strong></div>
+                    </div>
+                </div>
+                <div class="chart-panel">
+                    <div class="chart-header">
+                        <div>
+                            <div class="chart-title">Swarm population</div>
+                            <div class="chart-subtitle">Active peers and tracked info hashes</div>
+                        </div>
+                        <div class="legend"><span class="legend-item"><i class="swatch peers"></i>Peers</span><span
+                                class="legend-item"><i class="swatch swarms"></i>Swarms</span></div>
+                    </div>
+                    <div class="chart-wrap"><svg id="populationChart" role="img"
+                            aria-label="Line chart of active peers and tracked swarms"></svg>
+                        <div class="chart-empty" id="populationChartEmpty">Collecting samples</div>
+                    </div>
+                    <div class="chart-summary two">
+                        <div class="chart-stat"><span>Active peers</span><strong id="chartPeers">-</strong></div>
+                        <div class="chart-stat"><span>Tracked swarms</span><strong id="chartSwarms">-</strong></div>
+                    </div>
+                </div>
+                <div class="chart-panel">
+                    <div class="chart-header">
+                        <div>
+                            <div class="chart-title">Total torrents tracked</div>
+                            <div class="chart-subtitle">Daily UTC totals for the latest 30 days</div>
+                        </div>
+                        <div class="legend"><span class="legend-item"><i class="swatch torrents"></i>Torrents</span>
+                        </div>
+                    </div>
+                    <div class="chart-wrap"><svg id="torrentChart" role="img"
+                            aria-label="Bar chart of total torrents tracked by UTC day"></svg>
+                        <div class="chart-empty" id="torrentChartEmpty">No daily history</div>
+                    </div>
+                    <div class="chart-summary two">
+                        <div class="chart-stat"><span>Total torrents tracked</span><strong id="chartTorrents">-</strong>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        <footer><span>Rolling window: 60 seconds</span><span>Prometheus metrics available at /metrics</span></footer>
+    </main>
+    <script>
+        const byId = id => document.getElementById(id);
+        const bytes = value => { if (value < 1024) return value + ' B'; const units = ['KB', 'MB', 'GB', 'TB']; let size = value / 1024, index = 0; while (size >= 1024 && index < units.length - 1) { size /= 1024; index++ } return size.toFixed(size < 10 ? 1 : 0) + ' ' + units[index] };
+        const duration = seconds => { const days = Math.floor(seconds / 86400), hours = Math.floor(seconds % 86400 / 3600), minutes = Math.floor(seconds % 3600 / 60); return days ? days + 'd ' + hours + 'h' : hours ? hours + 'h ' + minutes + 'm' : minutes + 'm' };
+        const samples = [];
+        let torrentHistory = [];
+        const chartColors = { ingress: '#176447', egress: '#c85d46', requests: '#d39b25' };
+        function setView(view) { const chart = view === 'chart'; byId('overviewView').hidden = chart; byId('chartView').hidden = !chart; byId('overviewTab').setAttribute('aria-selected', String(!chart)); byId('chartTab').setAttribute('aria-selected', String(chart)); if (chart) drawCharts() }
+        byId('overviewTab').addEventListener('click', () => setView('overview')); byId('chartTab').addEventListener('click', () => setView('chart'));
+        function pathFor(values, max, width, height, left, top) { return values.map((value, index) => { const x = left + (values.length === 1 ? width / 2 : index * width / (values.length - 1)), y = top + height - (value / max) * height; return (index ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1) }).join(' ') }
+        function chartFrame(svgId, right = 14) { const svg = byId(svgId), width = Math.max(svg.clientWidth, 300), height = Math.max(svg.clientHeight, 240), left = 52, top = 12, bottom = 30; svg.setAttribute('viewBox', `0 0 ${width} ${height}`); return { svg, width, height, left, right, top, plotWidth: width - left - right, plotHeight: height - top - bottom } }
+        function timeLabels(frame) { const first = samples[0].time, last = samples[samples.length - 1].time; return `<text class="axis-label" x="${frame.left}" y="${frame.height - 5}">${first}</text><text class="axis-label" x="${frame.left + frame.plotWidth}" y="${frame.height - 5}" text-anchor="end">${last}</text>` }
+        function dayLabels(frame) { const format = day => new Date(day + 'T00:00:00Z').toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }), first = format(torrentHistory[0].day), last = format(torrentHistory[torrentHistory.length - 1].day); if (torrentHistory.length === 1) return `<text class="axis-label" x="${frame.left + frame.plotWidth / 2}" y="${frame.height - 5}" text-anchor="middle">${first}</text>`; return `<text class="axis-label" x="${frame.left}" y="${frame.height - 5}">${first}</text><text class="axis-label" x="${frame.left + frame.plotWidth}" y="${frame.height - 5}" text-anchor="end">${last}</text>` }
+        function drawSharedChart(svgId, emptyId, series) { const frame = chartFrame(svgId); if (samples.length < 2) { frame.svg.innerHTML = ''; byId(emptyId).hidden = false; return } byId(emptyId).hidden = true; const max = Math.max(4, ...series.flatMap(item => item.values)); let content = ''; for (let step = 0; step <= 4; step++) { const y = frame.top + frame.plotHeight * step / 4, label = Math.ceil(max * (1 - step / 4)); content += `<line class="grid-line" x1="${frame.left}" y1="${y}" x2="${frame.left + frame.plotWidth}" y2="${y}"/><text class="axis-label" x="${frame.left - 8}" y="${y + 4}" text-anchor="end">${label}</text>` } for (const item of series) content += `<path class="line ${item.name}" d="${pathFor(item.values, max, frame.plotWidth, frame.plotHeight, frame.left, frame.top)}"/>`; frame.svg.innerHTML = content + timeLabels(frame) }
+        function drawBarChart() { const frame = chartFrame('torrentChart'), values = torrentHistory.map(count => count.torrents); if (!torrentHistory.length) { frame.svg.innerHTML = ''; byId('torrentChartEmpty').hidden = false; return } byId('torrentChartEmpty').hidden = true; const max = Math.max(4, ...values), slot = frame.plotWidth / values.length, barWidth = Math.max(2, Math.min(52, slot * .68)); let content = ''; for (let step = 0; step <= 4; step++) { const y = frame.top + frame.plotHeight * step / 4, label = Math.ceil(max * (1 - step / 4)); content += `<line class="grid-line" x1="${frame.left}" y1="${y}" x2="${frame.left + frame.plotWidth}" y2="${y}"/><text class="axis-label" x="${frame.left - 8}" y="${y + 4}" text-anchor="end">${label}</text>` } values.forEach((value, index) => { const height = value / max * frame.plotHeight, x = frame.left + index * slot + (slot - barWidth) / 2, y = frame.top + frame.plotHeight - height; content += `<rect class="bar torrents" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${height.toFixed(1)}"/>` }); frame.svg.innerHTML = content + dayLabels(frame) }
+        function drawTrafficChart() { const frame = chartFrame('trafficChart', 38); if (samples.length < 2) { frame.svg.innerHTML = ''; byId('trafficChartEmpty').hidden = false; return } byId('trafficChartEmpty').hidden = true; const ingress = samples.map(sample => sample.ingress), egress = samples.map(sample => sample.egress), requests = samples.map(sample => sample.requests), maxBytes = Math.max(1, ...ingress, ...egress), maxRequests = Math.max(4, ...requests); let content = ''; for (let step = 0; step <= 4; step++) { const y = frame.top + frame.plotHeight * step / 4, byteLabel = bytes(Math.round(maxBytes * (1 - step / 4))), requestLabel = Math.ceil(maxRequests * (1 - step / 4)); content += `<line class="grid-line" x1="${frame.left}" y1="${y}" x2="${frame.left + frame.plotWidth}" y2="${y}"/><text class="axis-label" x="${frame.left - 8}" y="${y + 4}" text-anchor="end">${byteLabel}</text><text class="axis-label" x="${frame.left + frame.plotWidth + 8}" y="${y + 4}">${requestLabel}</text>` } content += `<path class="line ingress" d="${pathFor(ingress, maxBytes, frame.plotWidth, frame.plotHeight, frame.left, frame.top)}"/><path class="line egress" d="${pathFor(egress, maxBytes, frame.plotWidth, frame.plotHeight, frame.left, frame.top)}"/><path class="line requests" d="${pathFor(requests, maxRequests, frame.plotWidth, frame.plotHeight, frame.left, frame.top)}"/>`; frame.svg.innerHTML = content + timeLabels(frame) }
+        function drawCharts() { drawTrafficChart(); drawSharedChart('protocolChart', 'protocolChartEmpty', [{ name: 'http', values: samples.map(sample => sample.httpRequests) }, { name: 'udp', values: samples.map(sample => sample.udpRequests) }]); drawSharedChart('populationChart', 'populationChartEmpty', [{ name: 'peers', values: samples.map(sample => sample.peers) }, { name: 'swarms', values: samples.map(sample => sample.swarms) }]); drawBarChart() }
+        async function refresh() { try { const response = await fetch('/stats', { cache: 'no-store' }); if (!response.ok) throw new Error('status unavailable'); const stats = await response.json(), traffic = stats.traffic, http = traffic.http, udp = traffic.udp, ingressRate = http.ingress_bytes + udp.ingress_bytes, egressRate = http.egress_bytes + udp.egress_bytes, rpm = http.requests_per_minute + udp.requests_per_minute; torrentHistory = stats.daily_torrents; byId('peers').textContent = stats.peers; byId('swarms').textContent = stats.swarms; byId('uptime').textContent = duration(stats.uptime_seconds); byId('ingress').textContent = bytes(traffic.total_ingress_bytes); byId('egress').textContent = bytes(traffic.total_egress_bytes); byId('rpm').textContent = rpm; byId('ingressRate').textContent = bytes(ingressRate); byId('egressRate').textContent = bytes(egressRate); byId('httpRpm').textContent = http.requests_per_minute + ' rpm'; byId('udpRpm').textContent = udp.requests_per_minute + ' rpm'; byId('httpFlow').textContent = bytes(http.ingress_bytes) + ' in / ' + bytes(http.egress_bytes) + ' out'; byId('udpFlow').textContent = bytes(udp.ingress_bytes) + ' in / ' + bytes(udp.egress_bytes) + ' out'; byId('chartIngress').textContent = bytes(ingressRate); byId('chartEgress').textContent = bytes(egressRate); byId('chartRequests').textContent = rpm; byId('chartHttp').textContent = http.requests_per_minute; byId('chartUdp').textContent = udp.requests_per_minute; byId('chartPeers').textContent = stats.peers; byId('chartSwarms').textContent = stats.swarms; byId('chartTorrents').textContent = stats.swarms; samples.push({ time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), ingress: ingressRate, egress: egressRate, requests: rpm, httpRequests: http.requests_per_minute, udpRequests: udp.requests_per_minute, peers: stats.peers, swarms: stats.swarms }); if (samples.length > 60) samples.shift(); if (!byId('chartView').hidden) drawCharts(); byId('updated').textContent = 'Updated ' + new Date().toLocaleTimeString(); byId('status').textContent = 'Online'; byId('status').className = '' } catch (error) { byId('status').textContent = 'Unavailable'; byId('status').className = 'error'; byId('updated').textContent = 'Refresh failed' } }
+        addEventListener('resize', () => { if (!byId('chartView').hidden) drawCharts() });
+        refresh(); setInterval(refresh, 5000);
+    </script>
+</body>
+
+</html>

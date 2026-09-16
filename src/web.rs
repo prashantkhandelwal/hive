@@ -6,9 +6,10 @@ use std::{
 };
 
 use axum::{
-    body::Body,
-    extract::{ConnectInfo, RawQuery, State},
+    body::{to_bytes, Body},
+    extract::{ConnectInfo, RawQuery, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -19,7 +20,7 @@ use subtle::ConstantTimeEq;
 use crate::{
     config::AppConfig,
     metrics::AppMetrics,
-    persistence::Persistence,
+    persistence::{DailyTorrentCount, Persistence},
     rate_limit::RateLimiter,
     state::{unix_timestamp, AnnounceEvent, InfoHash, Peer, SwarmStats, TrackerState},
 };
@@ -44,7 +45,9 @@ struct HealthResponse {
 struct StatisticsResponse {
     peers: usize,
     swarms: usize,
+    daily_torrents: Vec<DailyTorrentCount>,
     uptime_seconds: u64,
+    traffic: crate::metrics::TrafficSnapshot,
 }
 
 #[derive(Debug)]
@@ -54,6 +57,7 @@ struct ApiError {
 }
 
 pub fn router(context: AppContext) -> Router {
+    let app_metrics = context.metrics.clone();
     Router::new()
         .route("/", get(index))
         .route("/announce", get(announce))
@@ -62,6 +66,49 @@ pub fn router(context: AppContext) -> Router {
         .route("/metrics", get(metrics))
         .route("/health", get(health))
         .with_state(context)
+        .layer(middleware::from_fn_with_state(app_metrics, observe_traffic))
+}
+
+async fn observe_traffic(
+    State(metrics): State<AppMetrics>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let metadata_bytes = request.method().as_str().len()
+        + request.uri().to_string().len()
+        + request
+            .headers()
+            .iter()
+            .map(|(name, value)| name.as_str().len() + value.as_bytes().len())
+            .sum::<usize>();
+    let (parts, body) = request.into_parts();
+    let request_body = match to_bytes(body, 1024 * 1024).await {
+        Ok(body) => body,
+        Err(_) => {
+            let response =
+                (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+            metrics.record_traffic("http", metadata_bytes, 22);
+            return response;
+        }
+    };
+    let ingress_bytes = metadata_bytes + request_body.len();
+    let response = next
+        .run(Request::from_parts(parts, Body::from(request_body)))
+        .await;
+    let (parts, body) = response.into_parts();
+    let response_body = match to_bytes(body, 8 * 1024 * 1024).await {
+        Ok(body) => body,
+        Err(_) => {
+            metrics.record_traffic("http", ingress_bytes, 0);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "response body unavailable",
+            )
+                .into_response();
+        }
+    };
+    metrics.record_traffic("http", ingress_bytes, response_body.len());
+    Response::from_parts(parts, Body::from(response_body))
 }
 
 async fn announce(
@@ -122,12 +169,22 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
-async fn statistics(State(context): State<AppContext>) -> Json<StatisticsResponse> {
-    Json(StatisticsResponse {
+async fn statistics(
+    State(context): State<AppContext>,
+) -> Result<Json<StatisticsResponse>, ApiError> {
+    let swarms = context.state.swarm_count();
+    let daily_torrents = context
+        .persistence
+        .daily_torrent_counts(swarms)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(StatisticsResponse {
         peers: context.state.peer_count(),
-        swarms: context.state.swarm_count(),
+        swarms,
+        daily_torrents,
         uptime_seconds: context.started_at.elapsed().as_secs(),
-    })
+        traffic: context.metrics.traffic_snapshot(),
+    }))
 }
 
 async fn metrics(
@@ -407,29 +464,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-const INDEX_HTML: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Hive Tracker</title>
-<style>
-:root{color-scheme:light;--ink:#18201d;--paper:#f4f1e8;--green:#1f6b4f;--yellow:#f2bd3d;--line:#c7c3b6}
-*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:"Segoe UI Variable",sans-serif}
-header{border-bottom:1px solid var(--line);padding:20px 5vw;display:flex;align-items:center;justify-content:space-between}
-h1{font-family:Georgia,serif;font-size:28px;margin:0;letter-spacing:0}main{max-width:960px;margin:10vh auto;padding:0 24px}
-.status{display:inline-flex;align-items:center;gap:8px;font-weight:650}.dot{width:10px;height:10px;background:var(--green);border-radius:50%}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--line);margin-top:28px}.metric{padding:28px;border-right:1px solid var(--line)}
-.metric:last-child{border:0}.value{font-family:Georgia,serif;font-size:42px}.label{margin-top:8px;color:#5d655f}footer{margin-top:24px;color:#5d655f;font-size:14px}
-@media(max-width:640px){main{margin-top:48px}.grid{grid-template-columns:1fr}.metric{border-right:0;border-bottom:1px solid var(--line)}}
-</style></head>
-<body><header><h1>Hive</h1><div class="status"><span class="dot"></span>Tracker online</div></header>
-<main><div class="grid"><div class="metric"><div class="value" id="peers">-</div><div class="label">Active peers</div></div>
-<div class="metric"><div class="value" id="swarms">-</div><div class="label">Tracked swarms</div></div>
-<div class="metric"><div class="value" id="uptime">-</div><div class="label">Uptime</div></div></div>
-<footer>HTTP and UDP tracker endpoints are active.</footer></main>
-<script>fetch('/stats').then(r=>r.json()).then(s=>{peers.textContent=s.peers;swarms.textContent=s.swarms;uptime.textContent=Math.floor(s.uptime_seconds/60)+'m'}).catch(()=>{})</script>
-</body></html>"#;
-
+const INDEX_HTML: &str = include_str!("../static/index.html");
 #[cfg(test)]
 mod tests {
     use super::*;

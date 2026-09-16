@@ -41,6 +41,9 @@ async fn main() -> Result<()> {
     let persistence = Persistence::open(&config.database_path).await?;
     persistence.load(&state).await?;
     state.remove_stale(config.peer_timeout);
+    persistence
+        .record_daily_torrent_count(state.swarm_count())
+        .await?;
     let metrics = AppMetrics::new()?;
     metrics.set_population(state.peer_count(), state.swarm_count());
     let rate_limiter = Arc::new(RateLimiter::per_minute(config.rate_limit_per_minute));
@@ -67,7 +70,7 @@ async fn main() -> Result<()> {
             UdpTracker::bind(
                 config.udp_addr,
                 Arc::clone(&state),
-                metrics,
+                metrics.clone(),
                 Arc::clone(&rate_limiter),
                 config.announce_interval,
             )
@@ -85,13 +88,35 @@ async fn main() -> Result<()> {
         config.persistence_interval,
         config.peer_timeout,
     ));
+    let traffic_log_task = tokio::spawn(log_traffic(metrics));
     info!(?protocol, "Hive tracker started");
     run_protocols(listener, udp, context).await?;
 
     persistence_task.abort();
+    traffic_log_task.abort();
     persistence.save(&state).await?;
     info!("Hive tracker stopped");
     Ok(())
+}
+
+async fn log_traffic(metrics: AppMetrics) {
+    let mut ticker = time::interval(std::time::Duration::from_secs(60));
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        let traffic = metrics.traffic_snapshot();
+        info!(
+            ingress_bytes_total = traffic.total_ingress_bytes,
+            egress_bytes_total = traffic.total_egress_bytes,
+            http_requests_per_minute = traffic.http.requests_per_minute,
+            udp_requests_per_minute = traffic.udp.requests_per_minute,
+            http_ingress_bytes_per_minute = traffic.http.ingress_bytes,
+            http_egress_bytes_per_minute = traffic.http.egress_bytes,
+            udp_ingress_bytes_per_minute = traffic.udp.ingress_bytes,
+            udp_egress_bytes_per_minute = traffic.udp.egress_bytes,
+            "traffic summary"
+        );
+    }
 }
 
 fn resolve_protocol(command_line: Option<Protocol>, configured: Protocol) -> Protocol {

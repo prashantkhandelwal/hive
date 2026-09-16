@@ -57,6 +57,8 @@ impl UdpTracker {
         loop {
             let (length, remote) = self.socket.recv_from(&mut buffer).await?;
             let response = self.handle_packet(&buffer[..length], remote);
+            let egress_bytes = response.as_ref().map(Vec::len).unwrap_or_default();
+            self.metrics.record_traffic("udp", length, egress_bytes);
             if let Some(response) = response {
                 self.socket.send_to(&response, remote).await?;
             }
