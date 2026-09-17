@@ -42,3 +42,4 @@ jobs:
         name: hive-tracker-${{ matrix.target }}
         path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
         if-no-files-found: error
+
