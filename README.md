@@ -102,3 +102,32 @@ cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+## Load Benchmark
+
+The ignored integration benchmark starts the release server with an isolated
+SQLite database, sends real HTTP announce requests, and reports throughput,
+average latency, average process CPU usage, and peak process memory. Its default
+workload is 50,000 requests with up to 2,000 in flight simultaneously:
+
+```powershell
+cargo test --release --test application_load -- --ignored --nocapture
+```
+
+Override the workload using environment variables:
+
+```powershell
+$env:HIVE_BENCH_REQUESTS = "100000"
+$env:HIVE_BENCH_CONCURRENCY = "5000"
+cargo test --release --test application_load -- --ignored --nocapture
+```
+
+Run it on an otherwise idle host and compare results from the same hardware.
+The client and server share the host, so reported CPU and throughput include
+local network-stack contention, while memory is sampled for the server process
+only.
+
+The **Load Benchmark** GitHub Actions workflow can also run this benchmark on
+an Ubuntu runner. Start it manually from the Actions tab and set the request
+count and concurrency inputs; its output is added to the job summary and kept
+as an artifact for 30 days.

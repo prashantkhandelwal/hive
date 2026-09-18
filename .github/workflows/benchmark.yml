@@ -1,0 +1,59 @@
+name: Load Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      requests:
+        description: Total HTTP announce requests
+        required: true
+        default: "50000"
+        type: string
+      concurrency:
+        description: Maximum simultaneous requests
+        required: true
+        default: "2000"
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: load-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: HTTP load (${{ inputs.requests }} requests, ${{ inputs.concurrency }} concurrent)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      HIVE_BENCH_REQUESTS: ${{ inputs.requests }}
+      HIVE_BENCH_CONCURRENCY: ${{ inputs.concurrency }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run full-application benchmark
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --release --test application_load -- --ignored --nocapture 2>&1 | tee benchmark-results.txt
+      - name: Add results to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Hive load benchmark"
+            echo '```text'
+            cat benchmark-results.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-benchmark-${{ github.run_id }}
+          path: benchmark-results.txt
+          if-no-files-found: warn
+          retention-days: 30
