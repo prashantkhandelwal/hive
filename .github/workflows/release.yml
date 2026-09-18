@@ -22,21 +22,47 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: hive-tracker
+            archive: hive-tracker-x86_64-unknown-linux-gnu.tar.gz
+            build_tool: cargo
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: hive-tracker
+            archive: hive-tracker-x86_64-unknown-linux-musl.tar.gz
+            build_tool: cross
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary: hive-tracker
+            archive: hive-tracker-aarch64-unknown-linux-gnu.tar.gz
+            build_tool: cross
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            binary: hive-tracker
+            archive: hive-tracker-armv7-unknown-linux-gnueabihf.tar.gz
+            build_tool: cross
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: hive-tracker.exe
             archive: hive-tracker-x86_64-pc-windows-msvc.zip
+            build_tool: cargo
           - os: macos-14
             target: aarch64-apple-darwin
             binary: hive-tracker
             archive: hive-tracker-aarch64-apple-darwin.tar.gz
+            build_tool: cargo
 
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust target
+        if: matrix.build_tool == 'cargo'
         run: rustup target add ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.build_tool == 'cross'
+        uses: taiki-e/install-action@cross
       - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: ${{ matrix.build_tool }} build --release --locked --target ${{ matrix.target }}
       - name: Package Windows binary
         if: runner.os == 'Windows'
         shell: pwsh
@@ -45,8 +71,8 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/package/
           Copy-Item README.md, hive.toml dist/package/
           Compress-Archive -Path dist/package/* -DestinationPath "dist/${{ matrix.archive }}"
-      - name: Package macOS binary
-        if: runner.os == 'macOS'
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
         run: |
           mkdir -p dist/package
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" README.md hive.toml dist/package/
