@@ -19,17 +19,33 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            build_tool: cargo
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build_tool: cross
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build_tool: cross
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            build_tool: cross
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            build_tool: cargo
           - os: macos-14
             target: aarch64-apple-darwin
+            build_tool: cargo
 
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust target
+      if: matrix.build_tool == 'cargo'
       run: rustup target add ${{ matrix.target }}
+    - name: Install cross
+      if: matrix.build_tool == 'cross'
+      uses: taiki-e/install-action@cross
     - name: Check source
-      run: cargo check --locked --all-targets --target ${{ matrix.target }}
+      run: ${{ matrix.build_tool }} check --locked --all-targets --target ${{ matrix.target }}
     - name: Run tests
-      run: cargo test --locked --target ${{ matrix.target }}
+      run: ${{ matrix.build_tool }} test --locked --target ${{ matrix.target }}
 
