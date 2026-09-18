@@ -17,6 +17,7 @@ target
 hive.db
 hive.db-shm
 hive.db-wal
+benchmark-results/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

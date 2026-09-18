@@ -54,6 +54,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: load-benchmark-${{ github.run_id }}
-          path: benchmark-results.txt
+          path: |
+            benchmark-results.txt
+            benchmark-results/benchmark-results.dat
+            benchmark-results/benchmark-requests.dat
+            benchmark-results/benchmark-results.gnuplot
           if-no-files-found: warn
           retention-days: 30

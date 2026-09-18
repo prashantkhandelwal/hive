@@ -107,20 +107,27 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 The ignored integration benchmark starts the release server with an isolated
 SQLite database, sends real HTTP announce requests, and reports throughput,
-average latency, average process CPU usage, and peak process memory. Its default
-workload is 50,000 requests with up to 2,000 in flight simultaneously:
+average latency, average process CPU usage, and peak process memory. By default,
+it runs 100,000 requests with concurrency set to 2,000:
 
 ```powershell
 cargo test --release --test application_load -- --ignored --nocapture
 ```
 
-Override the workload using environment variables:
+Set environment variables to choose a different request count or concurrency:
 
 ```powershell
 $env:HIVE_BENCH_REQUESTS = "100000"
 $env:HIVE_BENCH_CONCURRENCY = "5000"
 cargo test --release --test application_load -- --ignored --nocapture
 ```
+
+The benchmark writes aggregate metrics to `benchmark-results.dat`, one row per
+completed request to `benchmark-requests.dat`, and the plotting commands to
+`benchmark-results.gnuplot` under `benchmark-results/`. The detailed data
+contains each request's outcome, latency, cumulative throughput, server CPU,
+and server memory. Generate the four-panel PNG with
+`gnuplot benchmark-results/benchmark-results.gnuplot`.
 
 Run it on an otherwise idle host and compare results from the same hardware.
 The client and server share the host, so reported CPU and throughput include
@@ -129,5 +136,5 @@ only.
 
 The **Load Benchmark** GitHub Actions workflow can also run this benchmark on
 an Ubuntu runner. Start it manually from the Actions tab and set the request
-count and concurrency inputs; its output is added to the job summary and kept
-as an artifact for 30 days.
+count and concurrency. Its output is added to the job summary and kept as an
+artifact for 30 days.
