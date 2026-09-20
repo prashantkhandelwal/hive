@@ -11,7 +11,7 @@ use hive_tracker::{
     udp::UdpTracker,
     web::{router, AppContext},
 };
-use tokio::{net::TcpListener, time};
+use tokio::{net::TcpListener, sync::watch, time};
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -130,26 +130,55 @@ async fn run_protocols(
     context: AppContext,
     protocol: Protocol,
 ) -> Result<()> {
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let http_shutdown = shutdown_receiver.clone();
+    let udp_shutdown = shutdown_receiver;
     let http_server = async {
         axum::serve(
             listener,
             router(context, matches!(protocol, Protocol::Http | Protocol::Both))
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
+        .with_graceful_shutdown(wait_for_shutdown(http_shutdown))
         .await
         .context("web server failed")
     };
     let udp_server = async {
         let Some(udp) = udp else {
-            return std::future::pending::<Result<()>>().await;
+            wait_for_shutdown(udp_shutdown).await;
+            return Ok(());
         };
-        udp.run().await.context("UDP server failed")
+        udp.run(udp_shutdown).await.context("UDP server failed")
     };
 
+    tokio::pin!(http_server, udp_server);
+
     tokio::select! {
-        result = http_server => result,
-        result = udp_server => result,
-        _ = shutdown_signal() => Ok(()),
+        result = &mut http_server => {
+            shutdown_sender.send_replace(true);
+            let udp_result = udp_server.await;
+            result?;
+            udp_result
+        },
+        result = &mut udp_server => {
+            shutdown_sender.send_replace(true);
+            let http_result = http_server.await;
+            result?;
+            http_result
+        },
+        _ = shutdown_signal() => {
+            info!("shutdown requested; draining active requests");
+            shutdown_sender.send_replace(true);
+            let (http_result, udp_result) = tokio::join!(http_server, udp_server);
+            http_result?;
+            udp_result
+        },
+    }
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    if !*shutdown.borrow() {
+        let _ = shutdown.changed().await;
     }
 }
 
@@ -180,9 +209,32 @@ async fn periodic_maintenance(
     }
 }
 
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(signal) => signal,
+        Err(error) => {
+            error!(%error, "failed to install SIGTERM handler");
+            return;
+        }
+    };
+
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                error!(%error, "failed to install Ctrl+C handler");
+            }
+        }
+        _ = terminate.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
 async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
-        error!(%error, "failed to install shutdown signal handler");
+        error!(%error, "failed to install Ctrl+C handler");
     }
 }
 
