@@ -37,6 +37,8 @@ impl std::str::FromStr for Protocol {
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub default_protocol: Protocol,
+    pub enable_http_scrape: bool,
+    pub enable_udp_scrape: bool,
     pub http_addr: SocketAddr,
     pub udp_addr: SocketAddr,
     pub database_path: PathBuf,
@@ -67,6 +69,8 @@ impl AppConfig {
 #[serde(default, deny_unknown_fields)]
 struct FileConfig {
     default_protocol: Protocol,
+    enable_http_scrape: bool,
+    enable_udp_scrape: bool,
     http_addr: SocketAddr,
     udp_addr: SocketAddr,
     database_path: PathBuf,
@@ -82,6 +86,8 @@ impl Default for FileConfig {
     fn default() -> Self {
         Self {
             default_protocol: Protocol::Both,
+            enable_http_scrape: true,
+            enable_udp_scrape: true,
             http_addr: "0.0.0.0:3000"
                 .parse()
                 .expect("default HTTP address is valid"),
@@ -103,6 +109,8 @@ impl From<FileConfig> for AppConfig {
     fn from(config: FileConfig) -> Self {
         Self {
             default_protocol: config.default_protocol,
+            enable_http_scrape: config.enable_http_scrape,
+            enable_udp_scrape: config.enable_udp_scrape,
             http_addr: config.http_addr,
             udp_addr: config.udp_addr,
             database_path: config.database_path,
