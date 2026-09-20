@@ -27,6 +27,7 @@ pub struct UdpTracker {
     metrics: AppMetrics,
     rate_limiter: Arc<RateLimiter>,
     announce_interval: u32,
+    enable_scrape: bool,
     connection_secret: u64,
 }
 
@@ -37,6 +38,7 @@ impl UdpTracker {
         metrics: AppMetrics,
         rate_limiter: Arc<RateLimiter>,
         announce_interval: u32,
+        enable_scrape: bool,
     ) -> std::io::Result<Self> {
         let socket = UdpSocket::bind(address).await?;
         let entropy = SystemTime::now()
@@ -49,6 +51,7 @@ impl UdpTracker {
             metrics,
             rate_limiter,
             announce_interval,
+            enable_scrape,
             connection_secret: entropy ^ u64::from(std::process::id()),
         })
     }
@@ -84,7 +87,7 @@ impl UdpTracker {
         let response = match action {
             ACTION_CONNECT => self.connect(packet, remote, transaction_id),
             ACTION_ANNOUNCE => self.announce(packet, remote, transaction_id),
-            ACTION_SCRAPE => self.scrape(packet, remote, transaction_id),
+            ACTION_SCRAPE if self.enable_scrape => self.scrape(packet, remote, transaction_id),
             _ => error_response(transaction_id, "unsupported action"),
         };
         Some(response)

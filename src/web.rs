@@ -60,20 +60,20 @@ struct ApiError {
 
 pub fn router(context: AppContext, enable_http_tracker: bool) -> Router {
     let app_metrics = context.metrics.clone();
-    let router = Router::new()
-        .route("/", get(index))
-        .route("/scrape", get(scrape))
+    let config = &context.config;
+    let mut router = Router::new().route("/", get(index));
+    if config.enable_http_scrape {
+        router = router.route("/scrape", get(scrape));
+    }
+    router = router
         .route("/stats", get(statistics))
         .route("/metrics", get(metrics))
         .route("/health", get(health));
-    let router = if enable_http_tracker {
-        router.route("/announce", get(announce))
-    } else {
-        router
-    };
-    router
-        .with_state(context)
-        .layer(middleware::from_fn_with_state(app_metrics, observe_traffic))
+    if enable_http_tracker {
+        router = router.route("/announce", get(announce));
+    }
+    let router = router.with_state(context);
+    router.layer(middleware::from_fn_with_state(app_metrics, observe_traffic))
 }
 
 async fn observe_traffic(

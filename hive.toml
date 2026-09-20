@@ -8,5 +8,11 @@ persistence_interval = 30
 rate_limit_per_minute = 120
 log_filter = "hive_tracker=debug"
 
+# Set to false to disable only the HTTP /scrape endpoint.
+enable_http_scrape = false
+
+# Set to false to disable only the UDP scrape action.
+enable_udp_scrape = false
+
 # Uncomment to require an HTTP bearer token for /announce, /scrape, and /metrics.
 # auth_token = "change-me"

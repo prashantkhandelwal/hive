@@ -67,6 +67,7 @@ async fn main() -> Result<()> {
                 metrics.clone(),
                 Arc::clone(&rate_limiter),
                 config.announce_interval,
+                config.enable_udp_scrape,
             )
             .await
             .with_context(|| format!("failed to bind UDP listener at {}", config.udp_addr))?,
