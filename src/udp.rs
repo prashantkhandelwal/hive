@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, sync::watch};
 use tracing::debug;
 
 use crate::{
@@ -56,10 +56,14 @@ impl UdpTracker {
         })
     }
 
-    pub async fn run(self) -> std::io::Result<()> {
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> std::io::Result<()> {
         let mut buffer = [0_u8; 2048];
         loop {
-            let (length, remote) = self.socket.recv_from(&mut buffer).await?;
+            let received = tokio::select! {
+                result = self.socket.recv_from(&mut buffer) => result,
+                _ = shutdown.changed() => return Ok(()),
+            };
+            let (length, remote) = received?;
             let response = self.handle_packet(&buffer[..length], remote);
             let egress_bytes = response.as_ref().map(Vec::len).unwrap_or_default();
             self.metrics.record_traffic("udp", length, egress_bytes);
