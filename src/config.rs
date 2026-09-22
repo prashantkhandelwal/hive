@@ -2,7 +2,7 @@ use std::{fs, net::SocketAddr, path::Path, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq)]
@@ -11,7 +11,7 @@ pub struct ProtocolParseError {
     value: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Http,
