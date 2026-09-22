@@ -18,6 +18,8 @@ pub struct ProtocolTraffic {
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct TrafficSnapshot {
+    pub torrent_http: ProtocolTraffic,
+    pub web_http: ProtocolTraffic,
     pub http: ProtocolTraffic,
     pub udp: ProtocolTraffic,
     pub total_ingress_bytes: u64,
@@ -184,7 +186,11 @@ impl AppMetrics {
         let mut snapshot = TrafficSnapshot {
             total_ingress_bytes: self
                 .traffic_bytes
-                .with_label_values(&["http", "ingress"])
+                .with_label_values(&["torrent_http", "ingress"])
+                .get()
+                + self
+                    .traffic_bytes
+                .with_label_values(&["web_http", "ingress"])
                 .get()
                 + self
                     .traffic_bytes
@@ -192,7 +198,11 @@ impl AppMetrics {
                     .get(),
             total_egress_bytes: self
                 .traffic_bytes
-                .with_label_values(&["http", "egress"])
+                .with_label_values(&["torrent_http", "egress"])
+                .get()
+                + self
+                    .traffic_bytes
+                .with_label_values(&["web_http", "egress"])
                 .get()
                 + self
                     .traffic_bytes
@@ -203,19 +213,28 @@ impl AppMetrics {
         if let Ok(mut window) = self.traffic_window.lock() {
             prune_window(&mut window, second);
             for bucket in &window.buckets {
-                let traffic = if bucket.protocol == "http" {
-                    &mut snapshot.http
-                } else {
-                    &mut snapshot.udp
+                let traffic = match bucket.protocol {
+                    "torrent_http" => &mut snapshot.torrent_http,
+                    "web_http" => &mut snapshot.web_http,
+                    _ => &mut snapshot.udp,
                 };
                 traffic.ingress_bytes += bucket.ingress_bytes;
                 traffic.egress_bytes += bucket.egress_bytes;
                 traffic.requests_per_minute += bucket.requests;
             }
         }
+        snapshot.http = ProtocolTraffic {
+            ingress_bytes: snapshot.torrent_http.ingress_bytes + snapshot.web_http.ingress_bytes,
+            egress_bytes: snapshot.torrent_http.egress_bytes + snapshot.web_http.egress_bytes,
+            requests_per_minute: snapshot.torrent_http.requests_per_minute
+                + snapshot.web_http.requests_per_minute,
+        };
         self.requests_per_minute
-            .with_label_values(&["http"])
-            .set(snapshot.http.requests_per_minute as i64);
+            .with_label_values(&["torrent_http"])
+            .set(snapshot.torrent_http.requests_per_minute as i64);
+        self.requests_per_minute
+            .with_label_values(&["web_http"])
+            .set(snapshot.web_http.requests_per_minute as i64);
         self.requests_per_minute
             .with_label_values(&["udp"])
             .set(snapshot.udp.requests_per_minute as i64);
@@ -242,7 +261,7 @@ mod tests {
     #[test]
     fn given_traffic_outside_window_when_snapshotted_then_only_recent_requests_remain() {
         let metrics = AppMetrics::new().expect("metrics should initialize");
-        metrics.record_traffic_at("http", 100, 200, 1_000);
+        metrics.record_traffic_at("web_http", 100, 200, 1_000);
         metrics.record_traffic_at("udp", 10, 20, 1_060);
 
         let snapshot = metrics.traffic_snapshot_at(1_060);
@@ -250,5 +269,21 @@ mod tests {
         assert_eq!(snapshot.http.requests_per_minute, 0);
         assert_eq!(snapshot.udp.requests_per_minute, 1);
         assert_eq!(snapshot.total_ingress_bytes, 110);
+    }
+
+    #[test]
+    fn given_torrent_web_and_udp_traffic_when_snapshotted_then_each_is_isolated() {
+        let metrics = AppMetrics::new().expect("metrics should initialize");
+        metrics.record_traffic_at("torrent_http", 100, 200, 1_000);
+        metrics.record_traffic_at("web_http", 10, 20, 1_000);
+        metrics.record_traffic_at("udp", 1, 2, 1_000);
+
+        let snapshot = metrics.traffic_snapshot_at(1_000);
+
+        assert_eq!(snapshot.torrent_http.ingress_bytes, 100);
+        assert_eq!(snapshot.web_http.ingress_bytes, 10);
+        assert_eq!(snapshot.http.ingress_bytes, 110);
+        assert_eq!(snapshot.udp.ingress_bytes, 1);
+        assert_eq!(snapshot.total_ingress_bytes, 111);
     }
 }

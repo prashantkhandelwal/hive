@@ -19,7 +19,7 @@ use subtle::ConstantTimeEq;
 use tracing::debug;
 
 use crate::{
-    config::AppConfig,
+    config::{AppConfig, Protocol},
     metrics::AppMetrics,
     persistence::{DailyTorrentCount, Persistence},
     rate_limit::RateLimiter,
@@ -29,6 +29,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AppContext {
     pub config: AppConfig,
+    pub protocol: Protocol,
     pub state: Arc<TrackerState>,
     pub persistence: Persistence,
     pub metrics: AppMetrics,
@@ -44,6 +45,7 @@ struct HealthResponse {
 
 #[derive(Serialize)]
 struct StatisticsResponse {
+    protocol: Protocol,
     peers: usize,
     swarms: usize,
     torrents: usize,
@@ -84,6 +86,10 @@ async fn observe_traffic(
     let started_at = Instant::now();
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
+    let traffic_kind = match path.as_str() {
+        "/announce" | "/scrape" => "torrent_http",
+        _ => "web_http",
+    };
     let metadata_bytes = request.method().as_str().len()
         + request.uri().to_string().len()
         + request
@@ -97,7 +103,7 @@ async fn observe_traffic(
         Err(_) => {
             let response =
                 (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
-            metrics.record_traffic("http", metadata_bytes, 22);
+            metrics.record_traffic(traffic_kind, metadata_bytes, 22);
             return response;
         }
     };
@@ -109,7 +115,7 @@ async fn observe_traffic(
     let response_body = match to_bytes(body, 8 * 1024 * 1024).await {
         Ok(body) => body,
         Err(_) => {
-            metrics.record_traffic("http", ingress_bytes, 0);
+            metrics.record_traffic(traffic_kind, ingress_bytes, 0);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "response body unavailable",
@@ -117,7 +123,7 @@ async fn observe_traffic(
                 .into_response();
         }
     };
-    metrics.record_traffic("http", ingress_bytes, response_body.len());
+    metrics.record_traffic(traffic_kind, ingress_bytes, response_body.len());
     debug!(
         %method,
         %path,
@@ -200,6 +206,7 @@ async fn statistics(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(StatisticsResponse {
+        protocol: context.protocol,
         peers: context.state.peer_count(),
         swarms,
         torrents,

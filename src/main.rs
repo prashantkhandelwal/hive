@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
 
     let context = AppContext {
         config: config.clone(),
+        protocol,
         state: Arc::clone(&state),
         persistence: persistence.clone(),
         metrics: metrics.clone(),
@@ -109,10 +110,13 @@ async fn log_traffic(metrics: AppMetrics) {
         info!(
             ingress_bytes_total = traffic.total_ingress_bytes,
             egress_bytes_total = traffic.total_egress_bytes,
-            http_requests_per_minute = traffic.http.requests_per_minute,
+            torrent_http_requests_per_minute = traffic.torrent_http.requests_per_minute,
+            web_http_requests_per_minute = traffic.web_http.requests_per_minute,
             udp_requests_per_minute = traffic.udp.requests_per_minute,
-            http_ingress_bytes_per_minute = traffic.http.ingress_bytes,
-            http_egress_bytes_per_minute = traffic.http.egress_bytes,
+            torrent_http_ingress_bytes_per_minute = traffic.torrent_http.ingress_bytes,
+            torrent_http_egress_bytes_per_minute = traffic.torrent_http.egress_bytes,
+            web_http_ingress_bytes_per_minute = traffic.web_http.ingress_bytes,
+            web_http_egress_bytes_per_minute = traffic.web_http.egress_bytes,
             udp_ingress_bytes_per_minute = traffic.udp.ingress_bytes,
             udp_egress_bytes_per_minute = traffic.udp.egress_bytes,
             "traffic summary"
