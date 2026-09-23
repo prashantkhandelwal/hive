@@ -197,7 +197,7 @@
                 <div><span class="transfer-label">Requests / second</span><strong class="transfer-value" id="requestsPerSecond">-</strong></div>
             </div>
         </section>
-        <footer><span id="protocol">Active protocol: -</span><span>Daily transfer totals are stored in SQLite</span></footer>
+        <footer><span id="protocol">Active protocol: -</span><span>Powered by <a href="https://github.com/prashantkhandelwal/hive">Hive</a> <span id="version">-</span></span><span>Daily transfer totals are stored in SQLite</span></footer>
     </main>
     <script src="https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js"
         integrity="sha256-tmslrrTfhOMxmdwhaUAU0zbSIsvZ3rDlp8FL1qoND9A="
@@ -322,6 +322,7 @@
                 byId('requestsPerSecond').textContent = data.requests_per_second.toFixed(2);
                 byId('transferPeriod').textContent = periods[activePeriod];
                 byId('protocol').textContent = `Active protocol: ${data.protocol.toUpperCase()}`;
+                byId('version').textContent = 'v' + data.version;
                 history = data.history.metrics;
                 drawChart();
                 byId('status').textContent = 'Online';
