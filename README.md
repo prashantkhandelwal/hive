@@ -66,7 +66,6 @@ Hive reads configuration from `hive.toml` in the working directory.
 | `http_addr` | `0.0.0.0:3000` | Web UI and HTTP tracker listen address |
 | `udp_addr` | `0.0.0.0:6969` | UDP tracker listen address |
 | `database_path` | `hive.db` | SQLite database path |
-| `auth_token` | Unset | Optional HTTP bearer token |
 | `announce_interval` | `1800` | Client reannounce interval in seconds |
 | `peer_timeout` | `3600` | Maximum idle peer age in seconds |
 | `persistence_interval` | `30` | Snapshot interval in seconds |
@@ -79,17 +78,6 @@ command-line argument overrides `default_protocol` for the current process.
 Set `log_filter` to a tracing directive such as `hive_tracker=trace` for maximum
 detail or `hive_tracker=info` for quieter operational logs. Multiple directives
 can be comma-separated.
-
-When `auth_token` is set, `/announce`, `/scrape`, and `/metrics` require
-the following header:
-
-```http
-Authorization: Bearer your-token
-```
-
-The dashboard, aggregate statistics, and health endpoint remain public. The UDP
-tracker uses short-lived source-bound connection IDs and rate limiting, but BEP
-15 does not define bearer authentication.
 
 ## Client URLs
 

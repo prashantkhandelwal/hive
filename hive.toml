@@ -13,6 +13,3 @@ enable_http_scrape = true
 
 # Set to false to disable only the UDP scrape action.
 enable_udp_scrape = false
-
-# Uncomment to require an HTTP bearer token for /announce, /scrape, and /metrics.
-# auth_token = "change-me"

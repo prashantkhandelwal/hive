@@ -42,7 +42,6 @@ pub struct AppConfig {
     pub http_addr: SocketAddr,
     pub udp_addr: SocketAddr,
     pub database_path: PathBuf,
-    pub auth_token: Option<String>,
     pub announce_interval: u32,
     pub peer_timeout: Duration,
     pub persistence_interval: Duration,
@@ -74,7 +73,6 @@ struct FileConfig {
     http_addr: SocketAddr,
     udp_addr: SocketAddr,
     database_path: PathBuf,
-    auth_token: Option<String>,
     announce_interval: u32,
     peer_timeout: u64,
     persistence_interval: u64,
@@ -95,7 +93,6 @@ impl Default for FileConfig {
                 .parse()
                 .expect("default UDP address is valid"),
             database_path: PathBuf::from("hive.db"),
-            auth_token: None,
             announce_interval: 1800,
             peer_timeout: 3600,
             persistence_interval: 30,
@@ -114,7 +111,6 @@ impl From<FileConfig> for AppConfig {
             http_addr: config.http_addr,
             udp_addr: config.udp_addr,
             database_path: config.database_path,
-            auth_token: config.auth_token.filter(|value| !value.is_empty()),
             announce_interval: config.announce_interval,
             peer_timeout: Duration::from_secs(config.peer_timeout),
             persistence_interval: Duration::from_secs(config.persistence_interval),
@@ -142,7 +138,6 @@ mod tests {
                 default_protocol = "udp"
                 http_addr = "127.0.0.1:8080"
                 peer_timeout = 90
-                auth_token = "secret"
             "#,
         )
         .expect("configuration should parse");
@@ -150,7 +145,6 @@ mod tests {
         assert_eq!(config.default_protocol, Protocol::Udp);
         assert_eq!(config.http_addr, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.peer_timeout, Duration::from_secs(90));
-        assert_eq!(config.auth_token.as_deref(), Some("secret"));
         assert_eq!(config.udp_addr, "0.0.0.0:6969".parse().unwrap());
     }
 }
