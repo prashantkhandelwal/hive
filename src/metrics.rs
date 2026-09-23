@@ -26,6 +26,13 @@ pub struct TrafficSnapshot {
     pub total_egress_bytes: u64,
 }
 
+impl TrafficSnapshot {
+    pub fn requests_per_second(&self) -> f64 {
+        (self.http.requests_per_minute + self.udp.requests_per_minute) as f64
+            / TRAFFIC_WINDOW_SECONDS as f64
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TrafficBucket {
     second: u64,
@@ -285,5 +292,18 @@ mod tests {
         assert_eq!(snapshot.http.ingress_bytes, 110);
         assert_eq!(snapshot.udp.ingress_bytes, 1);
         assert_eq!(snapshot.total_ingress_bytes, 111);
+    }
+
+    #[test]
+    fn given_requests_in_rolling_window_when_rate_requested_then_returns_requests_per_second() {
+        let metrics = AppMetrics::new().expect("metrics should initialize");
+        for _ in 0..120 {
+            metrics.record_traffic_at("torrent_http", 1, 1, 1_000);
+        }
+
+        assert_eq!(
+            metrics.traffic_snapshot_at(1_000).requests_per_second(),
+            2.0
+        );
     }
 }

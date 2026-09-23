@@ -41,11 +41,12 @@ async fn main() -> Result<()> {
     let persistence = Persistence::open(&config.database_path).await?;
     persistence.load(&state).await?;
     state.remove_stale(config.peer_timeout);
-    persistence
-        .record_daily_torrent_count(state.torrent_count())
-        .await?;
     let metrics = AppMetrics::new()?;
     metrics.set_population(state.peer_count(), state.swarm_count());
+    let started_at = Instant::now();
+    persistence
+        .record_dashboard_snapshot(state.summary(), 0, metrics.traffic_snapshot())
+        .await?;
     let rate_limiter = Arc::new(RateLimiter::per_minute(config.rate_limit_per_minute));
 
     let context = AppContext {
@@ -55,7 +56,7 @@ async fn main() -> Result<()> {
         persistence: persistence.clone(),
         metrics: metrics.clone(),
         rate_limiter: Arc::clone(&rate_limiter),
-        started_at: Instant::now(),
+        started_at,
     };
     let listener = TcpListener::bind(config.http_addr)
         .await
@@ -83,8 +84,10 @@ async fn main() -> Result<()> {
         rate_limiter,
         config.persistence_interval,
         config.peer_timeout,
+        metrics.clone(),
+        started_at,
     ));
-    let traffic_log_task = tokio::spawn(log_traffic(metrics));
+    let traffic_log_task = tokio::spawn(log_traffic(metrics.clone()));
     info!(
         ?protocol,
         web_addr = %config.http_addr,
@@ -97,6 +100,13 @@ async fn main() -> Result<()> {
     persistence_task.abort();
     traffic_log_task.abort();
     persistence.save(&state).await?;
+    persistence
+        .record_dashboard_snapshot(
+            state.summary(),
+            started_at.elapsed().as_secs(),
+            metrics.traffic_snapshot(),
+        )
+        .await?;
     info!("Hive tracker stopped");
     Ok(())
 }
@@ -192,6 +202,8 @@ async fn periodic_maintenance(
     rate_limiter: Arc<RateLimiter>,
     interval: std::time::Duration,
     peer_timeout: std::time::Duration,
+    metrics: AppMetrics,
+    started_at: Instant,
 ) {
     let mut ticker = time::interval(interval);
     ticker.tick().await;
@@ -202,6 +214,15 @@ async fn periodic_maintenance(
         rate_limiter.remove_idle();
         if let Err(error) = persistence.save(&state).await {
             error!(%error, "failed to persist tracker state");
+        } else if let Err(error) = persistence
+            .record_dashboard_snapshot(
+                state.summary(),
+                started_at.elapsed().as_secs(),
+                metrics.traffic_snapshot(),
+            )
+            .await
+        {
+            error!(%error, "failed to persist dashboard metrics");
         } else {
             debug!(
                 peers = state.peer_count(),

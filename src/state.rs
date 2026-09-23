@@ -36,6 +36,15 @@ pub struct SwarmStats {
     pub downloaded: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct TrackerSummary {
+    pub peers: usize,
+    pub seeders: usize,
+    pub leechers: usize,
+    pub torrents: usize,
+    pub completed: u64,
+}
+
 #[derive(Default)]
 pub struct TrackerState {
     swarms: DashMap<InfoHash, HashMap<PeerId, Peer>>,
@@ -174,6 +183,34 @@ impl TrackerState {
     pub fn peer_count(&self) -> usize {
         self.swarms.iter().map(|swarm| swarm.len()).sum()
     }
+
+    pub fn summary(&self) -> TrackerSummary {
+        let (peers, seeders, leechers) =
+            self.swarms
+                .iter()
+                .fold((0, 0, 0), |(peers, seeders, leechers), swarm| {
+                    swarm.values().fold(
+                        (peers, seeders, leechers),
+                        |(peers, seeders, leechers), peer| {
+                            if peer.left == 0 {
+                                (peers + 1, seeders + 1, leechers)
+                            } else {
+                                (peers + 1, seeders, leechers + 1)
+                            }
+                        },
+                    )
+                });
+        TrackerSummary {
+            peers,
+            seeders,
+            leechers,
+            torrents: self.torrent_count(),
+            completed: self
+                .completed
+                .iter()
+                .fold(0_u64, |total, entry| total.saturating_add(*entry.value())),
+        }
+    }
 }
 
 pub fn unix_timestamp() -> u64 {
@@ -252,5 +289,24 @@ mod tests {
         assert_eq!(state.peer_count(), 0);
         assert_eq!(state.swarm_count(), 0);
         assert_eq!(state.torrent_count(), 0);
+    }
+
+    #[test]
+    fn given_mixed_swarm_when_summarized_then_all_dashboard_counts_are_returned() {
+        let state = TrackerState::default();
+        state.announce([1; 20], peer(1, 0), AnnounceEvent::Completed);
+        state.announce([1; 20], peer(2, 50), AnnounceEvent::Started);
+        state.announce([2; 20], peer(3, 0), AnnounceEvent::Started);
+
+        assert_eq!(
+            state.summary(),
+            TrackerSummary {
+                peers: 3,
+                seeders: 2,
+                leechers: 1,
+                torrents: 2,
+                completed: 1,
+            }
+        );
     }
 }
