@@ -210,9 +210,9 @@ async fn statistics(
     Query(query): Query<StatisticsQuery>,
 ) -> Result<Json<StatisticsResponse>, ApiError> {
     let (days, bucket_seconds) = match query.period.as_deref().unwrap_or("day") {
-        "day" => (1, 60 * 60),
-        "week" => (7, 6 * 60 * 60),
-        "month" => (30, 24 * 60 * 60),
+        "day" => (1, 5 * 60),
+        "week" => (7, 60 * 60),
+        "month" => (30, 6 * 60 * 60),
         _ => return Err(ApiError::bad_request("period must be day, week, or month")),
     };
     let summary = context.state.summary();
