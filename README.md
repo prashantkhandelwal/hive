@@ -113,6 +113,31 @@ response is binary bencoded tracker data (`application/x-bittorrent`), not
 human-readable text; use a bencode decoder rather than viewing it directly in a
 browser.
 
+Add `format=json` to have Hive decode the same bencoded scrape payload and
+return `application/json` instead:
+
+```text
+GET /scrape?format=json
+GET /scrape?info_hash=%00%01%02%03%04%05%06%07%08%09%0A%0B%0C%0D%0E%0F%10%11%12%13&format=json
+```
+
+JSON responses use lowercase hexadecimal info hashes as object keys:
+
+```json
+{
+  "files": {
+    "000102030405060708090a0b0c0d0e0f10111213": {
+      "complete": 4,
+      "downloaded": 12,
+      "incomplete": 2
+    }
+  }
+}
+```
+
+Omit `format` or use `format=bencode` to retain the standard BEP 48 binary
+response.
+
 ## Verification
 
 Run formatting, tests, and lint checks before deployment:
