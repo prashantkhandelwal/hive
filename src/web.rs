@@ -7,23 +7,25 @@ use std::{
 
 use axum::{
     body::{to_bytes, Body},
-    extract::{ConnectInfo, RawQuery, Request, State},
+    extract::{ConnectInfo, Query, RawQuery, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tracing::debug;
 
 use crate::{
     config::{AppConfig, Protocol},
     metrics::AppMetrics,
-    persistence::{DailyTorrentCount, Persistence},
+    persistence::{DashboardHistory, Persistence},
     rate_limit::RateLimiter,
-    state::{unix_timestamp, AnnounceEvent, InfoHash, Peer, SwarmStats, TrackerState},
+    state::{
+        unix_timestamp, AnnounceEvent, InfoHash, Peer, SwarmStats, TrackerState, TrackerSummary,
+    },
 };
 
 #[derive(Clone)]
@@ -46,12 +48,16 @@ struct HealthResponse {
 #[derive(Serialize)]
 struct StatisticsResponse {
     protocol: Protocol,
-    peers: usize,
-    swarms: usize,
-    torrents: usize,
-    daily_torrents: Vec<DailyTorrentCount>,
+    #[serde(flatten)]
+    summary: TrackerSummary,
     uptime_seconds: u64,
-    traffic: crate::metrics::TrafficSnapshot,
+    requests_per_second: f64,
+    history: DashboardHistory,
+}
+
+#[derive(Default, Deserialize)]
+struct StatisticsQuery {
+    period: Option<String>,
 }
 
 #[derive(Debug)]
@@ -201,22 +207,33 @@ async fn index() -> Html<&'static str> {
 
 async fn statistics(
     State(context): State<AppContext>,
+    Query(query): Query<StatisticsQuery>,
 ) -> Result<Json<StatisticsResponse>, ApiError> {
-    let swarms = context.state.swarm_count();
-    let torrents = context.state.torrent_count();
-    let daily_torrents = context
+    let (days, bucket_seconds) = match query.period.as_deref().unwrap_or("day") {
+        "day" => (1, 60 * 60),
+        "week" => (7, 6 * 60 * 60),
+        "month" => (30, 24 * 60 * 60),
+        _ => return Err(ApiError::bad_request("period must be day, week, or month")),
+    };
+    let summary = context.state.summary();
+    let uptime_seconds = context.started_at.elapsed().as_secs();
+    let traffic = context.metrics.traffic_snapshot();
+    context
         .persistence
-        .daily_torrent_counts(torrents)
+        .record_dashboard_snapshot(summary, uptime_seconds, traffic)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let history = context
+        .persistence
+        .dashboard_history(days, bucket_seconds)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(StatisticsResponse {
         protocol: context.protocol,
-        peers: context.state.peer_count(),
-        swarms,
-        torrents,
-        daily_torrents,
-        uptime_seconds: context.started_at.elapsed().as_secs(),
-        traffic: context.metrics.traffic_snapshot(),
+        summary,
+        uptime_seconds,
+        requests_per_second: traffic.requests_per_second(),
+        history,
     }))
 }
 

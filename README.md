@@ -9,7 +9,7 @@ The service exposes:
 * `GET /announce` for compact HTTP announces
 * `GET /scrape` for all torrents or one or more repeated `info_hash` parameters
 * `GET /health` for database-aware health checks
-* `GET /stats` for aggregate JSON statistics
+* `GET /stats?period=day|week|month` for current and historical JSON statistics
 * `GET /metrics` for Prometheus text exposition
 * `GET /` for the operational dashboard
 * UDP connect, announce, and scrape actions on port `6969` by default
@@ -41,6 +41,11 @@ Open `http://localhost:3000` for the dashboard. The default SQLite database is
 created as `hive.db` in the working directory. The dashboard remains available
 when `udp` is selected; in that mode, the read-only HTTP scrape route remains
 available while HTTP announces are disabled.
+
+The single-page dashboard shows peers, seeders, leechers, torrents, completed
+downloads, and uptime. Its shared trend chart supports day, week, and month
+views. Metric snapshots and daily ingress and egress totals are stored in
+SQLite, so transfer totals can be summed across the selected period.
 
 ## Configuration
 
