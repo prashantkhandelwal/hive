@@ -108,30 +108,8 @@
         }
         .periods button[aria-pressed="true"] { background: var(--ink); color: white; }
         .periods button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
-        .legend { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 18px 0 4px; }
-        .legend-item { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
-        .swatch { width: 18px; height: 3px; }
-        .peers { background: var(--green); stroke: var(--green); }
-        .seeders { background: var(--blue); stroke: var(--blue); }
-        .leechers { background: var(--coral); stroke: var(--coral); }
-        .torrents { background: var(--gold); stroke: var(--gold); }
-        .completed { background: var(--purple); stroke: var(--purple); }
-        .chart-wrap { position: relative; height: 340px; }
-        svg { display: block; width: 100%; height: 100%; overflow: visible; }
-        .grid-line { stroke: var(--line); stroke-width: 1; }
-        .axis-label { fill: var(--muted); font: 12px "Aptos", "Segoe UI Variable", sans-serif; }
-        .series {
-            fill: none;
-            stroke-width: 3;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }
-        .point { stroke: var(--surface); stroke-width: 2; }
-        .point.peers { fill: var(--green); }
-        .point.seeders { fill: var(--blue); }
-        .point.leechers { fill: var(--coral); }
-        .point.torrents { fill: var(--gold); }
-        .point.completed { fill: var(--purple); }
+        .chart-wrap { position: relative; width: 100%; height: 380px; }
+        .chart { width: 100%; height: 100%; }
         .empty {
             position: absolute;
             inset: 0;
@@ -173,7 +151,7 @@
             .chart-panel { padding: 18px 12px; }
             .periods { width: 100%; }
             .periods button { flex: 1; }
-            .chart-wrap { height: 290px; }
+            .chart-wrap { height: 320px; }
             footer { flex-direction: column; }
         }
     </style>
@@ -208,15 +186,8 @@
                     <button type="button" data-period="month" aria-pressed="false">Month</button>
                 </div>
             </div>
-            <div class="legend">
-                <span class="legend-item"><i class="swatch peers"></i>Peers</span>
-                <span class="legend-item"><i class="swatch seeders"></i>Seeders</span>
-                <span class="legend-item"><i class="swatch leechers"></i>Leechers</span>
-                <span class="legend-item"><i class="swatch torrents"></i>Torrents</span>
-                <span class="legend-item"><i class="swatch completed"></i>Completed</span>
-            </div>
             <div class="chart-wrap">
-                <svg id="trendChart" role="img" aria-label="Tracker metrics over time"></svg>
+                <div class="chart" id="trendChart" role="img" aria-label="Tracker metrics over time"></div>
                 <div class="empty" id="empty">Collecting history</div>
             </div>
             <div class="transfer">
@@ -228,11 +199,22 @@
         </section>
         <footer><span id="protocol">Active protocol: -</span><span>Daily transfer totals are stored in SQLite</span></footer>
     </main>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js"
+        integrity="sha256-tmslrrTfhOMxmdwhaUAU0zbSIsvZ3rDlp8FL1qoND9A="
+        crossorigin="anonymous"></script>
     <script>
         const byId = id => document.getElementById(id);
         const periods = { day: 'Today', week: 'Last 7 days', month: 'Last 30 days' };
+        const chartSeries = [
+            { key: 'peers', name: 'Peers' },
+            { key: 'seeders', name: 'Seeders' },
+            { key: 'leechers', name: 'Leechers' },
+            { key: 'torrents', name: 'Torrents' },
+            { key: 'completed', name: 'Completed' }
+        ];
         let activePeriod = 'day';
         let history = [];
+        let trendChart;
 
         const formatBytes = value => {
             if (value < 1024) return value + ' B';
@@ -253,60 +235,77 @@
             if (hours) return `${hours}h ${minutes}m`;
             return `${minutes}m`;
         };
-        const timeLabel = timestamp => new Date(timestamp * 1000).toLocaleString(undefined,
-            activePeriod === 'day'
-                ? { hour: 'numeric', minute: '2-digit' }
-                : { month: 'short', day: 'numeric' });
-        const pathFor = (values, maximum, frame) => values.map((value, index) => {
-            const x = frame.left + (values.length === 1 ? frame.width / 2 : index * frame.width / (values.length - 1));
-            const y = frame.top + frame.height - value / maximum * frame.height;
-            return `${index ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`;
-        }).join(' ');
-
         function drawChart() {
-            const svg = byId('trendChart');
-            if (!history.length) {
-                svg.innerHTML = '';
+            if (!window.echarts) {
                 byId('empty').hidden = false;
+                byId('empty').textContent = 'Chart library unavailable';
+                byId('empty').classList.add('error');
+                return;
+            }
+            trendChart ??= echarts.init(byId('trendChart'), null, { renderer: 'canvas' });
+            if (!history.length) {
+                trendChart.clear();
+                byId('empty').hidden = false;
+                byId('empty').textContent = 'Collecting history';
+                byId('empty').classList.remove('error');
                 return;
             }
             byId('empty').hidden = true;
-            const width = Math.max(svg.clientWidth, 300);
-            const height = Math.max(svg.clientHeight, 240);
-            const frame = { left: 54, top: 14, width: width - 68, height: height - 48 };
-            svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-            const series = ['peers', 'seeders', 'leechers', 'torrents', 'completed']
-                .map(name => ({ name, values: history.map(point => point[name]) }));
-            const maximum = Math.max(4, ...series.flatMap(item => item.values));
-            let content = '';
-            for (let step = 0; step <= 4; step++) {
-                const y = frame.top + frame.height * step / 4;
-                const label = Math.ceil(maximum * (1 - step / 4));
-                content += `<line class="grid-line" x1="${frame.left}" y1="${y}" x2="${frame.left + frame.width}" y2="${y}"/>`;
-                content += `<text class="axis-label" x="${frame.left - 9}" y="${y + 4}" text-anchor="end">${label}</text>`;
-            }
-            for (const item of series) {
-                content += `<path class="series ${item.name}" d="${pathFor(item.values, maximum, frame)}"/>`;
-                const pointIndexes = history.length <= 48
-                    ? item.values.map((_, index) => index)
-                    : [item.values.length - 1];
-                for (const index of pointIndexes) {
-                    const x = frame.left + (item.values.length === 1
-                        ? frame.width / 2
-                        : index * frame.width / (item.values.length - 1));
-                    const y = frame.top + frame.height - item.values[index] / maximum * frame.height;
-                    content += `<circle class="point ${item.name}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4"/>`;
-                }
-            }
-            const first = timeLabel(history[0].timestamp);
-            const last = timeLabel(history[history.length - 1].timestamp);
-            if (history.length === 1) {
-                content += `<text class="axis-label" x="${frame.left + frame.width / 2}" y="${height - 7}" text-anchor="middle">${first}</text>`;
-            } else {
-                content += `<text class="axis-label" x="${frame.left}" y="${height - 7}">${first}</text>`;
-                content += `<text class="axis-label" x="${frame.left + frame.width}" y="${height - 7}" text-anchor="end">${last}</text>`;
-            }
-            svg.innerHTML = content;
+            trendChart.setOption({
+                animationDuration: 350,
+                aria: { enabled: true },
+                color: ['#176447', '#32658a', '#c85d46', '#d39b25', '#76558f'],
+                textStyle: { color: '#626a65', fontFamily: '"Aptos", "Segoe UI Variable", sans-serif' },
+                tooltip: {
+                    trigger: 'axis',
+                    backgroundColor: '#18211d',
+                    borderWidth: 0,
+                    textStyle: { color: '#ffffff' },
+                    valueFormatter: value => Number(value).toLocaleString()
+                },
+                legend: {
+                    top: 4,
+                    left: 0,
+                    itemWidth: 18,
+                    itemHeight: 3,
+                    textStyle: { color: '#626a65' }
+                },
+                grid: { top: 58, right: 18, bottom: 45, left: 55 },
+                xAxis: {
+                    type: 'time',
+                    boundaryGap: false,
+                    axisLine: { lineStyle: { color: '#cbc7b9' } },
+                    axisTick: { show: false },
+                    axisLabel: {
+                        color: '#626a65',
+                        hideOverlap: true,
+                        formatter: value => {
+                            const date = new Date(value);
+                            return activePeriod === 'day'
+                                ? date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+                                : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+                        }
+                    },
+                    splitLine: { show: false }
+                },
+                yAxis: {
+                    type: 'value',
+                    min: 0,
+                    minInterval: 1,
+                    axisLabel: { color: '#626a65' },
+                    splitLine: { lineStyle: { color: '#cbc7b9' } }
+                },
+                series: chartSeries.map(item => ({
+                    name: item.name,
+                    type: 'line',
+                    data: history.map(point => [point.timestamp * 1000, point[item.key]]),
+                    showSymbol: history.length <= 48,
+                    symbol: 'circle',
+                    symbolSize: 7,
+                    lineStyle: { width: 3 },
+                    emphasis: { focus: 'series' }
+                }))
+            }, true);
         }
 
         async function loadStats() {
@@ -345,7 +344,7 @@
                 loadStats();
             });
         });
-        window.addEventListener('resize', drawChart);
+        window.addEventListener('resize', () => trendChart?.resize());
         loadStats();
         setInterval(loadStats, 30000);
     </script>
