@@ -462,7 +462,10 @@ fn compact_peers(peers: Vec<Peer>, requester: IpAddr) -> Vec<u8> {
 }
 
 fn bencoded_response(body: Vec<u8>) -> Response {
-    let headers = [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"))];
+    let headers = [(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(BITTORRENT_CONTENT_TYPE),
+    )];
     (headers, body).into_response()
 }
 
@@ -488,10 +491,15 @@ impl IntoResponse for ApiError {
         let mut body = format!("d14:failure reason{}:", message.len()).into_bytes();
         body.extend_from_slice(&message);
         body.push(b'e');
-        let headers = [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"))];
+        let headers = [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(BITTORRENT_CONTENT_TYPE),
+        )];
         (self.status, headers, Body::from(body)).into_response()
     }
 }
+
+const BITTORRENT_CONTENT_TYPE: &str = "application/x-bittorrent";
 
 const INDEX_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -509,6 +517,16 @@ mod tests {
         assert_eq!(
             required_identifier(&params, "info_hash").expect("identifier should parse"),
             [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        );
+    }
+
+    #[test]
+    fn given_bencoded_body_when_response_is_built_then_binary_content_type_is_used() {
+        let response = bencoded_response(b"de".to_vec());
+
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static(BITTORRENT_CONTENT_TYPE))
         );
     }
 }
