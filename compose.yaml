@@ -1,0 +1,29 @@
+services:
+  hive:
+    image: prashantkhandelwal/hive:latest
+    build:
+      context: .
+      args:
+        HIVE_VERSION: local
+    restart: unless-stopped
+    environment:
+      HIVE_PROTOCOL: ${HIVE_PROTOCOL:-both}
+      HIVE_ENABLE_HTTP_SCRAPE: ${HIVE_ENABLE_HTTP_SCRAPE:-true}
+      HIVE_ENABLE_UDP_SCRAPE: ${HIVE_ENABLE_UDP_SCRAPE:-true}
+      HIVE_HTTP_ADDR: 0.0.0.0:3000
+      HIVE_UDP_ADDR: 0.0.0.0:6969
+      HIVE_DATABASE_PATH: /data/hive.db
+      HIVE_AUTH_TOKEN: ${HIVE_AUTH_TOKEN:-}
+      HIVE_ANNOUNCE_INTERVAL: ${HIVE_ANNOUNCE_INTERVAL:-1800}
+      HIVE_PEER_TIMEOUT: ${HIVE_PEER_TIMEOUT:-3600}
+      HIVE_PERSISTENCE_INTERVAL: ${HIVE_PERSISTENCE_INTERVAL:-30}
+      HIVE_RATE_LIMIT_PER_MINUTE: ${HIVE_RATE_LIMIT_PER_MINUTE:-120}
+      HIVE_LOG_FILTER: ${HIVE_LOG_FILTER:-hive_tracker=info}
+    ports:
+      - "3000:3000"
+      - "6969:6969/udp"
+    volumes:
+      - hive-data:/data
+
+volumes:
+  hive-data:
