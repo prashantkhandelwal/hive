@@ -400,7 +400,7 @@ fn announce_url(base_url: &str, request_id: usize) -> String {
     let info_hash = percent_encoded_identifier(request_id as u64 / 50);
     let peer_id = percent_encoded_identifier(request_id as u64);
     let url = format!(
-        "{base_url}/announce?info_hash={info_hash}&peer_id={peer_id}&port=6881&left=1&numwant=50"
+        "{base_url}/announce?info_hash={info_hash}&peer_id={peer_id}&port=6881&uploaded=0&downloaded=0&left=1&numwant=50"
     );
     url
 }

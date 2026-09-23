@@ -81,6 +81,13 @@ impl TrackerState {
     }
 
     pub fn announce(&self, info_hash: InfoHash, peer: Peer, event: AnnounceEvent) -> SwarmStats {
+        let should_record_completion = event == AnnounceEvent::Completed
+            && self
+                .swarms
+                .get(&info_hash)
+                .and_then(|swarm| swarm.get(&peer.peer_id).map(|existing| existing.left != 0))
+                .unwrap_or(true);
+
         if event != AnnounceEvent::Stopped {
             self.completed.entry(info_hash).or_default();
         }
@@ -90,7 +97,13 @@ impl TrackerState {
                 entry.get_mut().remove(&peer.peer_id);
                 if entry.get().is_empty() {
                     entry.remove();
-                    self.completed.remove(&info_hash);
+                    if self
+                        .completed
+                        .get(&info_hash)
+                        .is_some_and(|count| *count == 0)
+                    {
+                        self.completed.remove(&info_hash);
+                    }
                 }
             }
         } else {
@@ -100,7 +113,7 @@ impl TrackerState {
                 .insert(peer.peer_id, peer);
         }
 
-        if event == AnnounceEvent::Completed {
+        if should_record_completion {
             *self.completed.entry(info_hash).or_default() += 1;
         }
 
@@ -164,7 +177,7 @@ impl TrackerState {
             !swarm.is_empty()
         });
         self.completed
-            .retain(|info_hash, _| self.swarms.contains_key(info_hash));
+            .retain(|info_hash, count| *count > 0 || self.swarms.contains_key(info_hash));
     }
 
     pub fn swarm_count(&self) -> usize {
@@ -222,8 +235,9 @@ mod tests {
 
         assert_eq!(state.peer_count(), 0);
         assert_eq!(state.swarm_count(), 0);
-        assert!(state.info_hashes().is_empty());
-        assert_eq!(state.torrent_count(), 0);
+        assert_eq!(state.info_hashes(), vec![info_hash]);
+        assert_eq!(state.torrent_count(), 1);
+        assert_eq!(state.stats(&info_hash).downloaded, 1);
     }
 
     #[test]
@@ -252,5 +266,32 @@ mod tests {
         assert_eq!(state.peer_count(), 0);
         assert_eq!(state.swarm_count(), 0);
         assert_eq!(state.torrent_count(), 0);
+    }
+
+    #[test]
+    fn given_repeated_completed_event_when_announced_then_download_is_counted_once() {
+        let state = TrackerState::default();
+        let info_hash = [10; 20];
+
+        state.announce(info_hash, peer(1, 100), AnnounceEvent::Started);
+        state.announce(info_hash, peer(1, 0), AnnounceEvent::Completed);
+        state.announce(info_hash, peer(1, 0), AnnounceEvent::Completed);
+
+        assert_eq!(state.stats(&info_hash).downloaded, 1);
+    }
+
+    #[test]
+    fn given_completed_torrent_when_peers_expire_then_download_history_is_retained() {
+        let state = TrackerState::default();
+        let info_hash = [11; 20];
+        let mut stale_peer = peer(1, 0);
+        stale_peer.last_seen = 0;
+
+        state.announce(info_hash, stale_peer, AnnounceEvent::Completed);
+        state.remove_stale(Duration::from_secs(1));
+
+        assert_eq!(state.peer_count(), 0);
+        assert_eq!(state.stats(&info_hash).downloaded, 1);
+        assert_eq!(state.torrent_count(), 1);
     }
 }
