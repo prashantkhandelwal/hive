@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::IpAddr,
     path::Path,
     str::FromStr,
@@ -32,6 +33,7 @@ pub enum PersistenceError {
 pub struct Persistence {
     pool: SqlitePool,
     traffic_checkpoint: Arc<Mutex<TrafficCheckpoint>>,
+    history_cache: Arc<Mutex<HashMap<(u64, u64), DashboardHistory>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -114,6 +116,7 @@ impl Persistence {
         Ok(Self {
             pool,
             traffic_checkpoint: Arc::new(Mutex::new(TrafficCheckpoint::default())),
+            history_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -167,6 +170,7 @@ impl Persistence {
         transaction.commit().await?;
         checkpoint.ingress_bytes = traffic.total_ingress_bytes;
         checkpoint.egress_bytes = traffic.total_egress_bytes;
+        self.history_cache.lock().await.clear();
         Ok(())
     }
 
@@ -175,6 +179,11 @@ impl Persistence {
         days: u64,
         bucket_seconds: u64,
     ) -> Result<DashboardHistory> {
+        let cache_key = (days, bucket_seconds);
+        let mut cache = self.history_cache.lock().await;
+        if let Some(history) = cache.get(&cache_key) {
+            return Ok(history.clone());
+        }
         let cutoff = unix_timestamp().saturating_sub(days * 24 * 60 * 60);
         let metrics = sqlx::query(
             "SELECT snapshot.recorded_at, snapshot.peers, snapshot.seeders, snapshot.leechers,
@@ -229,12 +238,14 @@ impl Persistence {
                     totals.1.saturating_add(point.egress_bytes),
                 )
             });
-        Ok(DashboardHistory {
+        let history = DashboardHistory {
             metrics,
             traffic,
             total_ingress_bytes,
             total_egress_bytes,
-        })
+        };
+        cache.insert(cache_key, history.clone());
+        Ok(history)
     }
 
     pub async fn load(&self, state: &TrackerState) -> Result<()> {
@@ -270,38 +281,56 @@ impl Persistence {
     }
 
     pub async fn save(&self, state: &TrackerState) -> Result<()> {
-        let snapshot = state.snapshot();
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query("DELETE FROM peers")
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("DELETE FROM swarms")
-            .execute(&mut *transaction)
-            .await?;
-
-        for (info_hash, peers, downloaded) in snapshot {
-            sqlx::query("INSERT INTO swarms (info_hash, downloaded) VALUES (?, ?)")
-                .bind(info_hash.as_slice())
-                .bind(sqlite_integer(downloaded))
-                .execute(&mut *transaction)
-                .await?;
-            for peer in peers {
-                sqlx::query(
-                    "INSERT INTO peers (info_hash, peer_id, ip, port, bytes_left, last_seen)
-                     VALUES (?, ?, ?, ?, ?, ?)",
-                )
-                .bind(info_hash.as_slice())
-                .bind(peer.peer_id.as_slice())
-                .bind(peer.ip.to_string())
-                .bind(i64::from(peer.port))
-                .bind(sqlite_integer(peer.left))
-                .bind(sqlite_integer(peer.last_seen))
-                .execute(&mut *transaction)
-                .await?;
-            }
+        let changes = state.drain_changes();
+        if changes.is_empty() {
+            return Ok(());
         }
-        transaction.commit().await?;
-        Ok(())
+        let result: Result<()> = async {
+            let mut transaction = self.pool.begin().await?;
+            for change in &changes {
+                sqlx::query("DELETE FROM peers WHERE info_hash = ?")
+                    .bind(change.info_hash.as_slice())
+                    .execute(&mut *transaction)
+                    .await?;
+                if let Some(downloaded) = change.downloaded {
+                    sqlx::query(
+                        "INSERT INTO swarms (info_hash, downloaded) VALUES (?, ?)
+                         ON CONFLICT(info_hash) DO UPDATE SET downloaded = excluded.downloaded",
+                    )
+                    .bind(change.info_hash.as_slice())
+                    .bind(sqlite_integer(downloaded))
+                    .execute(&mut *transaction)
+                    .await?;
+                    for peer in &change.peers {
+                        sqlx::query(
+                            "INSERT INTO peers (
+                                info_hash, peer_id, ip, port, bytes_left, last_seen
+                             ) VALUES (?, ?, ?, ?, ?, ?)",
+                        )
+                        .bind(change.info_hash.as_slice())
+                        .bind(peer.peer_id.as_slice())
+                        .bind(peer.ip.to_string())
+                        .bind(i64::from(peer.port))
+                        .bind(sqlite_integer(peer.left))
+                        .bind(sqlite_integer(peer.last_seen))
+                        .execute(&mut *transaction)
+                        .await?;
+                    }
+                } else {
+                    sqlx::query("DELETE FROM swarms WHERE info_hash = ?")
+                        .bind(change.info_hash.as_slice())
+                        .execute(&mut *transaction)
+                        .await?;
+                }
+            }
+            transaction.commit().await?;
+            Ok(())
+        }
+        .await;
+        if result.is_ok() {
+            state.acknowledge_changes(&changes);
+        }
+        result
     }
 
     pub async fn is_healthy(&self) -> bool {
@@ -368,9 +397,17 @@ mod tests {
             .record_dashboard_snapshot(summary, 10, traffic)
             .await
             .expect("first snapshot should persist");
+        let initial_history = database
+            .dashboard_history(1, 60)
+            .await
+            .expect("initial dashboard history should load");
+        assert_eq!(initial_history.metrics[0].peers, 5);
         database
             .record_dashboard_snapshot(
-                summary,
+                TrackerSummary {
+                    peers: 6,
+                    ..summary
+                },
                 20,
                 TrafficSnapshot {
                     total_ingress_bytes: 150,
@@ -386,10 +423,63 @@ mod tests {
             .await
             .expect("dashboard history should load");
         assert_eq!(history.metrics.len(), 1);
-        assert_eq!(history.metrics[0].peers, 5);
+        assert_eq!(history.metrics[0].peers, 6);
         assert_eq!(history.metrics[0].completed, 7);
         assert_eq!(history.total_ingress_bytes, 150);
         assert_eq!(history.total_egress_bytes, 260);
+        database.pool.close().await;
+        drop(database);
+        std::fs::remove_file(database_path).expect("temporary database should be removed");
+    }
+
+    #[tokio::test]
+    async fn given_changed_torrents_when_saved_then_only_current_state_is_restored() {
+        use crate::state::{unix_timestamp, AnnounceEvent};
+
+        let database_path = std::env::temp_dir().join(format!(
+            "hive-incremental-persistence-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let database = Persistence::open(&database_path)
+            .await
+            .expect("temporary database should open");
+        let state = TrackerState::default();
+        let first_hash = [1; 20];
+        let second_hash = [2; 20];
+        let peer = |peer_id| Peer {
+            peer_id: [peer_id; 20],
+            ip: "127.0.0.1".parse().expect("test address should parse"),
+            port: 6881,
+            left: 10,
+            last_seen: unix_timestamp(),
+        };
+        state.announce(first_hash, peer(1), AnnounceEvent::Started);
+        state.announce(second_hash, peer(2), AnnounceEvent::Started);
+        database
+            .save(&state)
+            .await
+            .expect("initial changes should persist");
+
+        state.announce(first_hash, peer(1), AnnounceEvent::Stopped);
+        database
+            .save(&state)
+            .await
+            .expect("targeted deletion should persist");
+
+        let restored = TrackerState::default();
+        database
+            .load(&restored)
+            .await
+            .expect("persisted state should load");
+        assert_eq!(restored.stats(&first_hash), Default::default());
+        assert_eq!(restored.peer_count(), 1);
+        assert_eq!(restored.torrent_count(), 1);
+        assert_eq!(restored.peers(&second_hash, &[0; 20], 10).len(), 1);
+
         database.pool.close().await;
         drop(database);
         std::fs::remove_file(database_path).expect("temporary database should be removed");
