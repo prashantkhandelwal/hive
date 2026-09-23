@@ -5,7 +5,7 @@ database_path = "hive.db"
 announce_interval = 1800
 peer_timeout = 3600
 persistence_interval = 30
-rate_limit_per_minute = 120
+rate_limit_per_minute = 1000
 log_filter = "hive_tracker=debug"
 
 # Set to false to disable only the HTTP /scrape endpoint.
