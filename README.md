@@ -91,7 +91,10 @@ Responses use compact peer encoding appropriate to the requesting address
 family.
 
 Calling `/scrape` without an `info_hash` returns a full scrape. To request only
-specific torrents, repeat the percent-encoded `info_hash` query parameter.
+specific torrents, repeat the percent-encoded `info_hash` query parameter. The
+response is binary bencoded tracker data (`application/x-bittorrent`), not
+human-readable text; use a bencode decoder rather than viewing it directly in a
+browser.
 
 ## Verification
 
