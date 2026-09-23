@@ -48,11 +48,6 @@ jobs:
             binary: hive-tracker.exe
             archive: hive-tracker-x86_64-pc-windows-msvc.zip
             build_tool: cargo
-          - os: macos-14
-            target: aarch64-apple-darwin
-            binary: hive-tracker
-            archive: hive-tracker-aarch64-apple-darwin.tar.gz
-            build_tool: cargo
 
     steps:
       - uses: actions/checkout@v4

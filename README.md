@@ -50,6 +50,12 @@ The trend chart uses Apache ECharts 6.1.0 loaded from jsDelivr with a pinned
 version and subresource integrity hash, so chart rendering requires access to
 the CDN.
 
+Tracker population totals are maintained incrementally for constant-time
+telemetry updates. Dashboard history is cached in memory until a new snapshot
+is committed, tracker persistence writes only changed torrents, and full HTTP
+scrape responses are cached for up to five seconds with mutation-based
+invalidation.
+
 ## Configuration
 
 Hive reads configuration from `hive.toml` in the working directory.

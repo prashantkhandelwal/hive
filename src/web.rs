@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Instant,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -21,7 +21,7 @@ use tracing::debug;
 use crate::{
     config::{AppConfig, Protocol},
     metrics::AppMetrics,
-    persistence::{DashboardHistory, Persistence},
+    persistence::{DashboardHistory, MetricPoint, Persistence},
     rate_limit::RateLimiter,
     state::{
         unix_timestamp, AnnounceEvent, InfoHash, Peer, SwarmStats, TrackerState, TrackerSummary,
@@ -36,7 +36,42 @@ pub struct AppContext {
     pub persistence: Persistence,
     pub metrics: AppMetrics,
     pub rate_limiter: Arc<RateLimiter>,
+    pub scrape_cache: Arc<ScrapeCache>,
     pub started_at: Instant,
+}
+
+const SCRAPE_CACHE_TTL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+pub struct ScrapeCache {
+    entry: Mutex<Option<CachedScrape>>,
+}
+
+struct CachedScrape {
+    revision: u64,
+    expires_at: Instant,
+    body: Vec<u8>,
+}
+
+impl ScrapeCache {
+    fn get(&self, revision: u64) -> Option<Vec<u8>> {
+        self.entry.lock().ok().and_then(|entry| {
+            entry
+                .as_ref()
+                .filter(|cached| cached.revision == revision && cached.expires_at > Instant::now())
+                .map(|cached| cached.body.clone())
+        })
+    }
+
+    fn insert(&self, revision: u64, body: Vec<u8>) {
+        if let Ok(mut entry) = self.entry.lock() {
+            *entry = Some(CachedScrape {
+                revision,
+                expires_at: Instant::now() + SCRAPE_CACHE_TTL,
+                body,
+            });
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -191,15 +226,27 @@ async fn scrape(
 ) -> Result<Response, ApiError> {
     tracker_gate(&context, &headers, remote.ip())?;
     let params = parse_query(query.as_deref().unwrap_or_default())?;
-    let hashes = match params.get("info_hash") {
-        Some(values) => values
-            .iter()
-            .map(|value| identifier(value, "info_hash"))
-            .collect::<Result<Vec<_>, _>>()?,
-        None => context.state.info_hashes(),
+    let body = match params.get("info_hash") {
+        Some(values) => {
+            let hashes = values
+                .iter()
+                .map(|value| identifier(value, "info_hash"))
+                .collect::<Result<Vec<_>, _>>()?;
+            scrape_payload(&context.state, hashes)
+        }
+        None => {
+            let revision = context.state.revision();
+            if let Some(body) = context.scrape_cache.get(revision) {
+                context.metrics.request("http", "scrape", "ok");
+                return Ok(bencoded_response(body));
+            }
+            let body = scrape_payload(&context.state, context.state.info_hashes());
+            context.scrape_cache.insert(revision, body.clone());
+            body
+        }
     };
     context.metrics.request("http", "scrape", "ok");
-    Ok(bencoded_response(scrape_payload(&context.state, hashes)))
+    Ok(bencoded_response(body))
 }
 
 async fn index() -> Html<&'static str> {
@@ -219,16 +266,28 @@ async fn statistics(
     let summary = context.state.summary();
     let uptime_seconds = context.started_at.elapsed().as_secs();
     let traffic = context.metrics.traffic_snapshot();
-    context
-        .persistence
-        .record_dashboard_snapshot(summary, uptime_seconds, traffic)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let history = context
+    let mut history = context
         .persistence
         .dashboard_history(days, bucket_seconds)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let current = MetricPoint {
+        timestamp: unix_timestamp() / 60 * 60,
+        peers: summary.peers,
+        seeders: summary.seeders,
+        leechers: summary.leechers,
+        torrents: summary.torrents,
+        completed: summary.completed,
+    };
+    if let Some(latest) = history
+        .metrics
+        .last_mut()
+        .filter(|point| point.timestamp == current.timestamp)
+    {
+        *latest = current;
+    } else {
+        history.metrics.push(current);
+    }
     Ok(Json(StatisticsResponse {
         version: build_version(),
         protocol: context.protocol,
@@ -580,6 +639,15 @@ const INDEX_HTML: &str = include_str!(concat!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn given_cached_scrape_when_revision_changes_then_cache_is_invalidated() {
+        let cache = ScrapeCache::default();
+        cache.insert(1, b"cached".to_vec());
+
+        assert_eq!(cache.get(1), Some(b"cached".to_vec()));
+        assert_eq!(cache.get(2), None);
+    }
 
     #[test]
     fn given_binary_query_when_parsed_then_identifiers_are_preserved() {

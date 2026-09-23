@@ -32,9 +32,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             build_tool: cargo
-          - os: macos-14
-            target: aarch64-apple-darwin
-            build_tool: cargo
 
     steps:
     - uses: actions/checkout@v4
