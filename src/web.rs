@@ -153,11 +153,14 @@ async fn announce(
     let info_hash = required_identifier(&params, "info_hash")?;
     let peer_id = required_identifier(&params, "peer_id")?;
     let port = required_number::<u16>(&params, "port")?;
+    let _uploaded = required_number::<u64>(&params, "uploaded")?;
+    let _downloaded = required_number::<u64>(&params, "downloaded")?;
     let left = required_number::<u64>(&params, "left")?;
     let numwant = optional_number::<usize>(&params, "numwant")?
         .unwrap_or(50)
         .min(200);
     let event = parse_event(first(&params, "event"))?;
+    let compact = parse_compact(first(&params, "compact"))?;
     let peer = Peer {
         peer_id,
         ip: remote.ip(),
@@ -175,6 +178,7 @@ async fn announce(
         peers,
         remote.ip(),
         context.config.announce_interval,
+        compact,
     )))
 }
 
@@ -412,6 +416,14 @@ fn parse_event(value: Option<&[u8]>) -> Result<AnnounceEvent, ApiError> {
     }
 }
 
+fn parse_compact(value: Option<&[u8]>) -> Result<bool, ApiError> {
+    match value {
+        None | Some(b"1") => Ok(true),
+        Some(b"0") => Ok(false),
+        _ => Err(ApiError::bad_request("compact must be 0 or 1")),
+    }
+}
+
 fn event_name(event: AnnounceEvent) -> &'static str {
     match event {
         AnnounceEvent::Started => "started",
@@ -426,17 +438,23 @@ fn announce_payload(
     peers: Vec<Peer>,
     requester: IpAddr,
     interval: u32,
+    compact: bool,
 ) -> Vec<u8> {
-    let compact = compact_peers(peers, requester);
     let mut output = format!(
-        "d8:completei{}e10:incompletei{}e8:intervali{}e5:peers{}:",
-        stats.complete,
-        stats.incomplete,
-        interval,
-        compact.len()
+        "d8:completei{}e10:incompletei{}e8:intervali{}e5:peers",
+        stats.complete, stats.incomplete, interval
     )
     .into_bytes();
-    output.extend_from_slice(&compact);
+    if compact {
+        let (peers, peers6) = compact_peers(peers);
+        append_bencoded_bytes(&mut output, &peers);
+        if !peers6.is_empty() {
+            output.extend_from_slice(b"6:peers6");
+            append_bencoded_bytes(&mut output, &peers6);
+        }
+    } else {
+        append_peer_list(&mut output, peers, requester);
+    }
     output.push(b'e');
     output
 }
@@ -460,22 +478,50 @@ fn scrape_payload(state: &TrackerState, mut hashes: Vec<InfoHash>) -> Vec<u8> {
     output
 }
 
-fn compact_peers(peers: Vec<Peer>, requester: IpAddr) -> Vec<u8> {
-    let mut output = Vec::new();
+fn compact_peers(peers: Vec<Peer>) -> (Vec<u8>, Vec<u8>) {
+    let mut peers4 = Vec::new();
+    let mut peers6 = Vec::new();
     for peer in peers {
-        match (requester, peer.ip) {
-            (IpAddr::V4(_), IpAddr::V4(ip)) => {
-                output.extend_from_slice(&ip.octets());
-                output.extend_from_slice(&peer.port.to_be_bytes());
+        match peer.ip {
+            IpAddr::V4(ip) => {
+                peers4.extend_from_slice(&ip.octets());
+                peers4.extend_from_slice(&peer.port.to_be_bytes());
             }
-            (IpAddr::V6(_), IpAddr::V6(ip)) => {
-                output.extend_from_slice(&ip.octets());
-                output.extend_from_slice(&peer.port.to_be_bytes());
+            IpAddr::V6(ip) => {
+                peers6.extend_from_slice(&ip.octets());
+                peers6.extend_from_slice(&peer.port.to_be_bytes());
             }
-            _ => {}
         }
     }
-    output
+    (peers4, peers6)
+}
+
+fn append_peer_list(output: &mut Vec<u8>, peers: Vec<Peer>, requester: IpAddr) {
+    output.push(b'l');
+    for peer in peers {
+        if !same_address_family(requester, peer.ip) {
+            continue;
+        }
+        output.extend_from_slice(b"d2:ip");
+        append_bencoded_bytes(output, peer.ip.to_string().as_bytes());
+        output.extend_from_slice(b"7:peer id20:");
+        output.extend_from_slice(&peer.peer_id);
+        output.extend_from_slice(format!("4:porti{}ee", peer.port).as_bytes());
+    }
+    output.push(b'e');
+}
+
+fn append_bencoded_bytes(output: &mut Vec<u8>, value: &[u8]) {
+    output.extend_from_slice(value.len().to_string().as_bytes());
+    output.push(b':');
+    output.extend_from_slice(value);
+}
+
+fn same_address_family(left: IpAddr, right: IpAddr) -> bool {
+    matches!(
+        (left, right),
+        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
+    )
 }
 
 fn bencoded_response(body: Vec<u8>) -> Response {
@@ -544,6 +590,112 @@ mod tests {
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE),
             Some(&HeaderValue::from_static(BITTORRENT_CONTENT_TYPE))
+        );
+    }
+
+    #[test]
+    fn given_missing_transfer_counters_when_announce_is_parsed_then_request_is_rejected() {
+        let params = parse_query(
+            "info_hash=aaaaaaaaaaaaaaaaaaaa&peer_id=bbbbbbbbbbbbbbbbbbbb&port=6881&left=0",
+        )
+        .expect("query should parse");
+
+        assert_eq!(
+            required_number::<u64>(&params, "uploaded")
+                .expect_err("uploaded should be required")
+                .message,
+            "missing uploaded"
+        );
+        assert_eq!(
+            required_number::<u64>(&params, "downloaded")
+                .expect_err("downloaded should be required")
+                .message,
+            "missing downloaded"
+        );
+    }
+
+    #[test]
+    fn given_compact_disabled_when_announce_payload_is_built_then_bep3_peer_list_is_returned() {
+        let peer = Peer {
+            peer_id: [b'p'; 20],
+            ip: "127.0.0.1".parse().unwrap(),
+            port: 6881,
+            left: 0,
+            last_seen: 0,
+        };
+
+        let payload = announce_payload(
+            SwarmStats {
+                complete: 1,
+                incomplete: 0,
+                downloaded: 1,
+            },
+            vec![peer],
+            "127.0.0.2".parse().unwrap(),
+            1800,
+            false,
+        );
+
+        assert_eq!(
+            payload,
+            b"d8:completei1e10:incompletei0e8:intervali1800e5:peersld2:ip9:127.0.0.1\
+7:peer id20:pppppppppppppppppppp4:porti6881eeee"
+        );
+    }
+
+    #[test]
+    fn given_mixed_address_families_when_compact_payload_is_built_then_peers_are_separated() {
+        let peers = vec![
+            Peer {
+                peer_id: [1; 20],
+                ip: "127.0.0.1".parse().unwrap(),
+                port: 6881,
+                left: 1,
+                last_seen: 0,
+            },
+            Peer {
+                peer_id: [2; 20],
+                ip: "::1".parse().unwrap(),
+                port: 6882,
+                left: 1,
+                last_seen: 0,
+            },
+        ];
+
+        let payload = announce_payload(
+            SwarmStats::default(),
+            peers,
+            "127.0.0.2".parse().unwrap(),
+            1800,
+            true,
+        );
+
+        assert!(payload.windows(7).any(|window| window == b"5:peers"));
+        assert!(payload.windows(8).any(|window| window == b"6:peers6"));
+        assert!(payload.ends_with(&[0x1a, 0xe2, b'e']));
+    }
+
+    #[test]
+    fn given_completed_torrent_when_scraped_then_bep48_statistics_are_returned() {
+        let state = TrackerState::default();
+        let info_hash = [b'a'; 20];
+        let mut peer = Peer {
+            peer_id: [b'p'; 20],
+            ip: "127.0.0.1".parse().unwrap(),
+            port: 6881,
+            left: 10,
+            last_seen: 0,
+        };
+        state.announce(info_hash, peer.clone(), AnnounceEvent::Started);
+        peer.left = 0;
+        state.announce(info_hash, peer, AnnounceEvent::Completed);
+
+        let payload = scrape_payload(&state, vec![info_hash]);
+
+        assert_eq!(
+            payload,
+            b"d5:filesd20:aaaaaaaaaaaaaaaaaaaad8:completei1e10:downloadedi1e\
+10:incompletei0eeee"
         );
     }
 }

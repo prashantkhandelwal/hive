@@ -92,8 +92,11 @@ udp://tracker.example.com:6969/announce
 ```
 
 HTTP requests must percent-encode the raw 20-byte `info_hash` and `peer_id`.
-Responses use compact peer encoding appropriate to the requesting address
-family.
+Announce requests follow BEP 3 and must include `port`, `uploaded`,
+`downloaded`, and `left`. Responses use BEP 23 compact peer encoding by
+default; send `compact=0` to request the original BEP 3 list of peer
+dictionaries. Compact IPv4 and IPv6 peers are returned under `peers` and
+`peers6`, respectively.
 
 Calling `/scrape` without an `info_hash` returns a full scrape. To request only
 specific torrents, repeat the percent-encoded `info_hash` query parameter. The
