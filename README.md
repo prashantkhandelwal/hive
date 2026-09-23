@@ -47,6 +47,12 @@ downloads, and uptime. Its shared trend chart supports day, week, and month
 views. Metric snapshots and daily ingress and egress totals are stored in
 SQLite, so transfer totals can be summed across the selected period.
 
+Tracker population totals are maintained incrementally for constant-time
+telemetry updates. Dashboard history is cached in memory until a new snapshot
+is committed, tracker persistence writes only changed torrents, and full HTTP
+scrape responses are cached for up to five seconds with mutation-based
+invalidation.
+
 ## Configuration
 
 Hive reads configuration from `hive.toml` in the working directory.

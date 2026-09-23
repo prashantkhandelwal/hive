@@ -9,7 +9,7 @@ use hive_tracker::{
     rate_limit::RateLimiter,
     state::TrackerState,
     udp::UdpTracker,
-    web::{router, AppContext},
+    web::{router, AppContext, ScrapeCache},
 };
 use tokio::{net::TcpListener, sync::watch, time};
 use tracing::{debug, error, info};
@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
         persistence: persistence.clone(),
         metrics: metrics.clone(),
         rate_limiter: Arc::clone(&rate_limiter),
+        scrape_cache: Arc::new(ScrapeCache::default()),
         started_at,
     };
     let listener = TcpListener::bind(config.http_addr)
