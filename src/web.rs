@@ -82,6 +82,7 @@ struct HealthResponse {
 
 #[derive(Serialize)]
 struct StatisticsResponse {
+    version: &'static str,
     protocol: Protocol,
     #[serde(flatten)]
     summary: TrackerSummary,
@@ -288,12 +289,20 @@ async fn statistics(
         history.metrics.push(current);
     }
     Ok(Json(StatisticsResponse {
+        version: build_version(),
         protocol: context.protocol,
         summary,
         uptime_seconds,
         requests_per_second: traffic.requests_per_second(),
         history,
     }))
+}
+
+fn build_version() -> &'static str {
+    match option_env!("HIVE_VERSION") {
+        Some(version) => version,
+        None => env!("CARGO_PKG_VERSION"),
+    }
 }
 
 async fn metrics(

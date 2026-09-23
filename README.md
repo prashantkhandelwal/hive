@@ -46,6 +46,9 @@ The single-page dashboard shows peers, seeders, leechers, torrents, completed
 downloads, and uptime. Its shared trend chart supports day, week, and month
 views. Metric snapshots and daily ingress and egress totals are stored in
 SQLite, so transfer totals can be summed across the selected period.
+The trend chart uses Apache ECharts 6.1.0 loaded from jsDelivr with a pinned
+version and subresource integrity hash, so chart rendering requires access to
+the CDN.
 
 Tracker population totals are maintained incrementally for constant-time
 telemetry updates. Dashboard history is cached in memory until a new snapshot
