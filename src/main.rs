@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
         web_addr = %config.http_addr,
         udp_addr = %config.udp_addr,
         database = %config.database_path.display(),
+        max_concurrent_http_requests = config.max_concurrent_http_requests,
         "Hive tracker started"
     );
     run_protocols(listener, udp, context, protocol).await?;

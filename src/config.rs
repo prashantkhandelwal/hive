@@ -1,4 +1,7 @@
-use std::{env, fs, net::SocketAddr, path::Path, path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    env, fs, net::SocketAddr, num::NonZeroUsize, path::Path, path::PathBuf, str::FromStr,
+    time::Duration,
+};
 
 use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
@@ -46,6 +49,7 @@ pub struct AppConfig {
     pub peer_timeout: Duration,
     pub persistence_interval: Duration,
     pub rate_limit_per_minute: u32,
+    pub max_concurrent_http_requests: usize,
     pub log_filter: String,
 }
 
@@ -82,6 +86,7 @@ struct FileConfig {
     peer_timeout: u64,
     persistence_interval: u64,
     rate_limit_per_minute: u32,
+    max_concurrent_http_requests: NonZeroUsize,
     log_filter: String,
 }
 
@@ -102,6 +107,8 @@ impl Default for FileConfig {
             peer_timeout: 3600,
             persistence_interval: 30,
             rate_limit_per_minute: 120,
+            max_concurrent_http_requests: NonZeroUsize::new(128)
+                .expect("default HTTP concurrency limit is nonzero"),
             log_filter: "hive_tracker=info".to_owned(),
         }
     }
@@ -129,6 +136,10 @@ impl FileConfig {
         override_parsed!("HIVE_PEER_TIMEOUT", peer_timeout);
         override_parsed!("HIVE_PERSISTENCE_INTERVAL", persistence_interval);
         override_parsed!("HIVE_RATE_LIMIT_PER_MINUTE", rate_limit_per_minute);
+        override_parsed!(
+            "HIVE_MAX_CONCURRENT_HTTP_REQUESTS",
+            max_concurrent_http_requests
+        );
 
         if let Some(raw) = value("HIVE_DATABASE_PATH")? {
             if raw.is_empty() {
@@ -174,6 +185,7 @@ impl From<FileConfig> for AppConfig {
             peer_timeout: Duration::from_secs(config.peer_timeout),
             persistence_interval: Duration::from_secs(config.persistence_interval),
             rate_limit_per_minute: config.rate_limit_per_minute,
+            max_concurrent_http_requests: config.max_concurrent_http_requests.get(),
             log_filter: config.log_filter,
         }
     }
@@ -197,6 +209,7 @@ mod tests {
                 default_protocol = "udp"
                 http_addr = "127.0.0.1:8080"
                 peer_timeout = 90
+                max_concurrent_http_requests = 64
             "#,
         )
         .expect("configuration should parse");
@@ -205,6 +218,21 @@ mod tests {
         assert_eq!(config.http_addr, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.peer_timeout, Duration::from_secs(90));
         assert_eq!(config.udp_addr, "0.0.0.0:6969".parse().unwrap());
+        assert_eq!(config.max_concurrent_http_requests, 64);
+    }
+
+    #[test]
+    fn given_default_configuration_when_loaded_then_recommended_http_concurrency_is_used() {
+        let config = AppConfig::from_toml("").expect("default configuration should parse");
+
+        assert_eq!(config.max_concurrent_http_requests, 128);
+    }
+
+    #[test]
+    fn given_zero_http_concurrency_in_toml_when_loaded_then_configuration_is_rejected() {
+        let result = AppConfig::from_toml("max_concurrent_http_requests = 0");
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -221,6 +249,7 @@ mod tests {
             ("HIVE_PEER_TIMEOUT", "1800"),
             ("HIVE_PERSISTENCE_INTERVAL", "60"),
             ("HIVE_RATE_LIMIT_PER_MINUTE", "500"),
+            ("HIVE_MAX_CONCURRENT_HTTP_REQUESTS", "256"),
             ("HIVE_LOG_FILTER", "hive_tracker=warn"),
         ]);
 
@@ -239,6 +268,7 @@ mod tests {
         assert_eq!(config.peer_timeout, Duration::from_secs(1800));
         assert_eq!(config.persistence_interval, Duration::from_secs(60));
         assert_eq!(config.rate_limit_per_minute, 500);
+        assert_eq!(config.max_concurrent_http_requests, 256);
         assert_eq!(config.log_filter, "hive_tracker=warn");
     }
 
@@ -251,5 +281,20 @@ mod tests {
             .expect_err("invalid environment value should fail");
 
         assert!(error.to_string().contains("HIVE_PEER_TIMEOUT"));
+    }
+
+    #[test]
+    fn given_zero_http_concurrency_when_applied_then_configuration_is_rejected() {
+        let mut config = FileConfig::default();
+
+        let error = config
+            .apply_environment(|name| {
+                Ok((name == "HIVE_MAX_CONCURRENT_HTTP_REQUESTS").then(|| "0".to_owned()))
+            })
+            .expect_err("zero concurrency should fail");
+
+        assert!(error
+            .to_string()
+            .contains("HIVE_MAX_CONCURRENT_HTTP_REQUESTS"));
     }
 }

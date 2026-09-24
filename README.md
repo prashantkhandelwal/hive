@@ -87,10 +87,17 @@ Hive reads configuration from `hive.toml` in the working directory.
 | `peer_timeout` | `3600` | Maximum idle peer age in seconds |
 | `persistence_interval` | `30` | Snapshot interval in seconds |
 | `rate_limit_per_minute` | `120` | Per-source-IP request allowance |
+| `max_concurrent_http_requests` | `128` | Maximum HTTP requests processed concurrently |
 | `log_filter` | `hive_tracker=info` | Tracing filter and verbosity |
 
 Use `--config path/to/config.toml` to load another file. The `--protocol`
 command-line argument overrides `default_protocol` for the current process.
+
+The HTTP concurrency limit provides overload protection while retaining
+headroom above the observed throughput optimum near 64 in-flight requests.
+Requests above the configured limit wait until capacity is available. The
+limit applies to all HTTP routes and does not affect the UDP listener. Values
+must be greater than zero.
 
 Set `log_filter` to a tracing directive such as `hive_tracker=trace` for maximum
 detail or `hive_tracker=info` for quieter operational logs. Multiple directives
@@ -101,6 +108,39 @@ and log output reduce announce throughput.
 The dashboard, aggregate statistics, and health endpoint remain public. The UDP
 tracker uses short-lived source-bound connection IDs and rate limiting, but BEP
 15 does not define bearer authentication.
+
+## Linux systemd service
+
+The included `hive-tracker.service` runs Hive as a background service under a
+dynamic, unprivileged user. It stores persistent data in `/var/lib/hive`, reads
+configuration from `/etc/hive/hive.toml`, and sends logs to the system journal.
+
+Build the release binary and install the binary, configuration, and unit:
+
+```bash
+cargo build --release
+sudo install -Dm755 target/release/hive-tracker /usr/local/bin/hive-tracker
+sudo install -Dm644 hive.toml /etc/hive/hive.toml
+sudo install -Dm644 hive-tracker.service /etc/systemd/system/hive-tracker.service
+```
+
+Set `database_path = "hive.db"` in `/etc/hive/hive.toml` to store the database
+in `/var/lib/hive`. Optional environment overrides can be placed in
+`/etc/hive/hive.env` using the `HIVE_*` variables listed below.
+
+Reload systemd, enable Hive at boot, and start it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now hive-tracker
+sudo systemctl status hive-tracker
+```
+
+Follow service logs with:
+
+```bash
+sudo journalctl -u hive-tracker -f
+```
 
 ## Docker
 
@@ -131,6 +171,7 @@ docker run --detach `
   --env "HIVE_PEER_TIMEOUT=3600" `
   --env "HIVE_PERSISTENCE_INTERVAL=30" `
   --env "HIVE_RATE_LIMIT_PER_MINUTE=500" `
+  --env "HIVE_MAX_CONCURRENT_HTTP_REQUESTS=128" `
   --env "HIVE_LOG_FILTER=hive_tracker=info" `
   prashantkhandelwal/hive:latest
 ```
@@ -153,6 +194,7 @@ Environment variables override values from `/etc/hive/hive.toml`:
 | `HIVE_PEER_TIMEOUT` | `3600` | Maximum idle peer age in seconds |
 | `HIVE_PERSISTENCE_INTERVAL` | `30` | Persistence interval in seconds |
 | `HIVE_RATE_LIMIT_PER_MINUTE` | `120` | Per-source-IP request allowance |
+| `HIVE_MAX_CONCURRENT_HTTP_REQUESTS` | `128` | Maximum HTTP requests processed concurrently |
 | `HIVE_LOG_FILTER` | `hive_tracker=info` | Tracing filter |
 
 For secrets, prefer an environment file over placing the token in shell
@@ -318,3 +360,46 @@ The **Load Benchmark** GitHub Actions workflow can also run this benchmark on
 an Ubuntu runner. Start it manually from the Actions tab and set the request
 count and concurrency. Its output is added to the job summary and kept as an
 artifact for 30 days.
+
+### Concurrency sweep and charts
+
+The benchmark runner scripts execute multiple concurrency levels, preserve the
+raw data and detailed chart from every run, and use GNUplot to create a combined
+six-panel chart for throughput, latency, CPU, memory, CPU efficiency, and
+failures. Cargo and GNUplot must be available on `PATH`.
+
+Run the default sweep from PowerShell:
+
+```powershell
+.\scripts\run-load-benchmark.ps1
+```
+
+Customize the request count, concurrency levels, repetitions, and output
+directory:
+
+```powershell
+.\scripts\run-load-benchmark.ps1 `
+  -Requests 500000 `
+  -Concurrency 1,4,16,64,256,1000 `
+  -Runs 3 `
+  -OutputDirectory benchmark-results\sweep
+```
+
+Run the default sweep on Linux:
+
+```bash
+bash scripts/run-load-benchmark.sh
+```
+
+Customize it with command-line options:
+
+```bash
+bash scripts/run-load-benchmark.sh \
+  --requests 500000 \
+  --concurrency 1,4,16,64,256,1000 \
+  --runs 3 \
+  --output benchmark-results/sweep
+```
+
+The combined data, GNUplot input, and PNG are written as `summary.dat`,
+`summary.gnuplot`, and `summary.png` in the selected output directory.
