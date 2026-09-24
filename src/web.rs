@@ -9,14 +9,13 @@ use std::{
 use axum::{
     body::{to_bytes, Body},
     extract::{ConnectInfo, Query, RawQuery, Request, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 use tracing::debug;
 
 use crate::{
@@ -201,10 +200,9 @@ async fn observe_traffic(
 async fn announce(
     State(context): State<AppContext>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
-    tracker_gate(&context, &headers, remote.ip())?;
+    tracker_gate(&context, remote.ip())?;
     let params = parse_query(query.as_deref().unwrap_or_default())?;
     let info_hash = required_identifier(&params, "info_hash")?;
     let peer_id = required_identifier(&params, "peer_id")?;
@@ -241,10 +239,9 @@ async fn announce(
 async fn scrape(
     State(context): State<AppContext>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
-    tracker_gate(&context, &headers, remote.ip())?;
+    tracker_gate(&context, remote.ip())?;
     let params = parse_query(query.as_deref().unwrap_or_default())?;
     let format = scrape_format(first(&params, "format"))?;
     let body = match params.get("info_hash") {
@@ -333,11 +330,7 @@ fn build_version() -> &'static str {
     }
 }
 
-async fn metrics(
-    State(context): State<AppContext>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    authenticate(&context, &headers)?;
+async fn metrics(State(context): State<AppContext>) -> Result<Response, ApiError> {
     update_population(&context);
     let body = context
         .metrics
@@ -370,8 +363,7 @@ async fn health(State(context): State<AppContext>) -> (StatusCode, Json<HealthRe
     }
 }
 
-fn tracker_gate(context: &AppContext, headers: &HeaderMap, ip: IpAddr) -> Result<(), ApiError> {
-    authenticate(context, headers)?;
+fn tracker_gate(context: &AppContext, ip: IpAddr) -> Result<(), ApiError> {
     if !context.rate_limiter.check(ip) {
         context.metrics.request("http", "tracker", "rate_limited");
         return Err(ApiError {
@@ -380,27 +372,6 @@ fn tracker_gate(context: &AppContext, headers: &HeaderMap, ip: IpAddr) -> Result
         });
     }
     Ok(())
-}
-
-fn authenticate(context: &AppContext, headers: &HeaderMap) -> Result<(), ApiError> {
-    let Some(expected) = &context.config.auth_token else {
-        return Ok(());
-    };
-    let provided = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    let valid = provided
-        .map(|value| bool::from(value.as_bytes().ct_eq(expected.as_bytes())))
-        .unwrap_or(false);
-    if valid {
-        Ok(())
-    } else {
-        Err(ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            message: "authentication required".into(),
-        })
-    }
 }
 
 fn update_population(context: &AppContext) {
