@@ -199,10 +199,23 @@ docker run --detach --name hive `
   prashantkhandelwal/hive:latest
 ```
 
-Release tags publish Linux images for `amd64`, `arm64`, and `arm/v7`. A release
-such as `v1.2.3` publishes the tags `1.2.3`, `1.2`, `1`, and `latest`.
+Pushing a `v*` tag or publishing a GitHub Release triggers the **Release**
+workflow, which builds and uploads the binary archives. If both events occur
+for the same tag at the same time, workflow concurrency keeps only the latest
+run.
+
+Release tags publish Linux images for `amd64`, `arm64`, and `arm/v7`.
 Docker images are built and published by the separate **Docker Release**
 workflow; the **Release** workflow only builds and publishes binary archives.
+
+To build an existing release that was published before the workflow trigger was
+available, run **Actions → Release → Run workflow** and enter its tag. You can
+also trigger it with GitHub CLI:
+
+```powershell
+gh workflow run release.yml --ref main --field tag=v1.2.3
+gh run watch
+```
 
 To publish an existing release tag manually, open **Actions → Docker Release →
 Run workflow** and enter a tag such as `v1.2.3`. The tag must already exist in
