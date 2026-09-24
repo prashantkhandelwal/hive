@@ -136,9 +136,6 @@ impl FileConfig {
             }
             self.database_path = PathBuf::from(raw);
         }
-        if let Some(raw) = value("HIVE_AUTH_TOKEN")? {
-            self.auth_token = Some(raw);
-        }
         if let Some(raw) = value("HIVE_LOG_FILTER")? {
             self.log_filter = raw;
         }
@@ -220,7 +217,6 @@ mod tests {
             ("HIVE_HTTP_ADDR", "127.0.0.1:8080"),
             ("HIVE_UDP_ADDR", "127.0.0.1:6968"),
             ("HIVE_DATABASE_PATH", "/data/custom.db"),
-            ("HIVE_AUTH_TOKEN", "secret"),
             ("HIVE_ANNOUNCE_INTERVAL", "900"),
             ("HIVE_PEER_TIMEOUT", "1800"),
             ("HIVE_PERSISTENCE_INTERVAL", "60"),
@@ -239,7 +235,6 @@ mod tests {
         assert_eq!(config.http_addr, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.udp_addr, "127.0.0.1:6968".parse().unwrap());
         assert_eq!(config.database_path, PathBuf::from("/data/custom.db"));
-        assert_eq!(config.auth_token.as_deref(), Some("secret"));
         assert_eq!(config.announce_interval, 900);
         assert_eq!(config.peer_timeout, Duration::from_secs(1800));
         assert_eq!(config.persistence_interval, Duration::from_secs(60));
