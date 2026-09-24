@@ -16,6 +16,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tower::limit::ConcurrencyLimitLayer;
 use tracing::debug;
 
 use crate::{
@@ -125,6 +126,7 @@ struct ApiError {
 pub fn router(context: AppContext, enable_http_tracker: bool) -> Router {
     let app_metrics = context.metrics.clone();
     let config = &context.config;
+    let max_concurrent_http_requests = config.max_concurrent_http_requests;
     let mut router = Router::new().route("/", get(index));
     if config.enable_http_scrape {
         router = router.route("/scrape", get(scrape));
@@ -137,7 +139,9 @@ pub fn router(context: AppContext, enable_http_tracker: bool) -> Router {
         router = router.route("/announce", get(announce));
     }
     let router = router.with_state(context);
-    router.layer(middleware::from_fn_with_state(app_metrics, observe_traffic))
+    router
+        .layer(middleware::from_fn_with_state(app_metrics, observe_traffic))
+        .layer(ConcurrencyLimitLayer::new(max_concurrent_http_requests))
 }
 
 async fn observe_traffic(

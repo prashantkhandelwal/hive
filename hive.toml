@@ -6,6 +6,7 @@ announce_interval = 1800
 peer_timeout = 3600
 persistence_interval = 30
 rate_limit_per_minute = 500
+max_concurrent_http_requests = 128
 log_filter = "hive_tracker=info"
 
 # Set to false to disable only the HTTP /scrape endpoint.
@@ -13,4 +14,3 @@ enable_http_scrape = true
 
 # Set to false to disable only the UDP scrape action.
 enable_udp_scrape = false
-

@@ -98,6 +98,7 @@ announce_interval = 1800
 peer_timeout = 3600
 persistence_interval = 3600
 rate_limit_per_minute = 4294967295
+max_concurrent_http_requests = 128
 log_filter = "hive_tracker=warn"
 "#,
             database_path.display().to_string().replace('\\', "/")
