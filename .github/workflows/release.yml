@@ -4,14 +4,22 @@ on:
   push:
     tags:
       - "v*"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build, for example v1.2.3
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
-  HIVE_VERSION: ${{ github.ref_name }}
+  HIVE_VERSION: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: release-${{ inputs.tag || github.event.release.tag_name || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -51,6 +59,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
       - name: Install Rust target
         if: matrix.build_tool == 'cargo'
         run: rustup target add ${{ matrix.target }}
@@ -101,7 +111,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
