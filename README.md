@@ -43,9 +43,12 @@ when `udp` is selected; in that mode, the read-only HTTP scrape route remains
 available while HTTP announces are disabled.
 
 The single-page dashboard shows peers, seeders, leechers, torrents, completed
-downloads, and uptime. Its shared trend chart supports day, week, and month
-views. Metric snapshots and daily ingress and egress totals are stored in
-SQLite, so transfer totals can be summed across the selected period.
+downloads, uptime, and the total HTTP and UDP request rate averaged over the
+rolling previous 60 seconds. Its shared trend chart supports day, week, and
+month views. Metric snapshots and daily ingress and egress totals are stored in
+SQLite, so transfer totals can be summed across the selected period. Lifetime
+request counters since the current process started remain available through
+Prometheus.
 The trend chart uses Apache ECharts 6.1.0 loaded from jsDelivr with a pinned
 version and subresource integrity hash, so chart rendering requires access to
 the CDN.
@@ -238,10 +241,23 @@ docker run --detach --name hive `
   prashantkhandelwal/hive:latest
 ```
 
-Release tags publish Linux images for `amd64`, `arm64`, and `arm/v7`. A release
-such as `v1.2.3` publishes the tags `1.2.3`, `1.2`, `1`, and `latest`.
+Pushing a `v*` tag or publishing a GitHub Release triggers the **Release**
+workflow, which builds and uploads the binary archives. If both events occur
+for the same tag at the same time, workflow concurrency keeps only the latest
+run.
+
+Release tags publish Linux images for `amd64`, `arm64`, and `arm/v7`.
 Docker images are built and published by the separate **Docker Release**
 workflow; the **Release** workflow only builds and publishes binary archives.
+
+To build an existing release that was published before the workflow trigger was
+available, run **Actions → Release → Run workflow** and enter its tag. You can
+also trigger it with GitHub CLI:
+
+```powershell
+gh workflow run release.yml --ref main --field tag=v1.2.3
+gh run watch
+```
 
 To publish an existing release tag manually, open **Actions → Docker Release →
 Run workflow** and enter a tag such as `v1.2.3`. The tag must already exist in

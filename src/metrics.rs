@@ -24,6 +24,7 @@ pub struct TrafficSnapshot {
     pub web_http: ProtocolTraffic,
     pub http: ProtocolTraffic,
     pub udp: ProtocolTraffic,
+    pub total_requests: u64,
     pub total_ingress_bytes: u64,
     pub total_egress_bytes: u64,
 }
@@ -51,20 +52,31 @@ struct TrafficWindow {
 
 #[derive(Clone)]
 struct TrafficCounters {
+    torrent_http_requests: IntCounter,
     torrent_http_ingress: IntCounter,
     torrent_http_egress: IntCounter,
+    web_http_requests: IntCounter,
     web_http_ingress: IntCounter,
     web_http_egress: IntCounter,
+    udp_requests: IntCounter,
     udp_ingress: IntCounter,
     udp_egress: IntCounter,
 }
 
 impl TrafficCounters {
-    fn select(&self, protocol: &str) -> (&IntCounter, &IntCounter) {
+    fn select(&self, protocol: &str) -> (&IntCounter, &IntCounter, &IntCounter) {
         match protocol {
-            "torrent_http" => (&self.torrent_http_ingress, &self.torrent_http_egress),
-            "web_http" => (&self.web_http_ingress, &self.web_http_egress),
-            _ => (&self.udp_ingress, &self.udp_egress),
+            "torrent_http" => (
+                &self.torrent_http_requests,
+                &self.torrent_http_ingress,
+                &self.torrent_http_egress,
+            ),
+            "web_http" => (
+                &self.web_http_requests,
+                &self.web_http_ingress,
+                &self.web_http_egress,
+            ),
+            _ => (&self.udp_requests, &self.udp_ingress, &self.udp_egress),
         }
     }
 }
@@ -102,6 +114,13 @@ impl AppMetrics {
             ),
             &["protocol", "direction"],
         )?;
+        let traffic_requests = IntCounterVec::new(
+            Opts::new(
+                "hive_traffic_requests_total",
+                "Application requests handled since process start",
+            ),
+            &["protocol"],
+        )?;
         let requests_per_minute = IntGaugeVec::new(
             Opts::new(
                 "hive_requests_per_minute",
@@ -115,14 +134,18 @@ impl AppMetrics {
         registry.register(Box::new(requests.clone()))?;
         registry.register(Box::new(announce_events.clone()))?;
         registry.register(Box::new(traffic_bytes.clone()))?;
+        registry.register(Box::new(traffic_requests.clone()))?;
         registry.register(Box::new(requests_per_minute.clone()))?;
         registry.register(Box::new(active_peers.clone()))?;
         registry.register(Box::new(active_swarms.clone()))?;
         let traffic_counters = TrafficCounters {
+            torrent_http_requests: traffic_requests.with_label_values(&["torrent_http"]),
             torrent_http_ingress: traffic_bytes.with_label_values(&["torrent_http", "ingress"]),
             torrent_http_egress: traffic_bytes.with_label_values(&["torrent_http", "egress"]),
+            web_http_requests: traffic_requests.with_label_values(&["web_http"]),
             web_http_ingress: traffic_bytes.with_label_values(&["web_http", "ingress"]),
             web_http_egress: traffic_bytes.with_label_values(&["web_http", "egress"]),
+            udp_requests: traffic_requests.with_label_values(&["udp"]),
             udp_ingress: traffic_bytes.with_label_values(&["udp", "ingress"]),
             udp_egress: traffic_bytes.with_label_values(&["udp", "egress"]),
         };
@@ -189,7 +212,9 @@ impl AppMetrics {
         egress_bytes: u64,
         second: u64,
     ) {
-        let (ingress_counter, egress_counter) = self.traffic_counters.select(protocol);
+        let (request_counter, ingress_counter, egress_counter) =
+            self.traffic_counters.select(protocol);
+        request_counter.inc();
         ingress_counter.inc_by(ingress_bytes);
         egress_counter.inc_by(egress_bytes);
 
@@ -218,6 +243,9 @@ impl AppMetrics {
 
     fn traffic_snapshot_at(&self, second: u64) -> TrafficSnapshot {
         let mut snapshot = TrafficSnapshot {
+            total_requests: self.traffic_counters.torrent_http_requests.get()
+                + self.traffic_counters.web_http_requests.get()
+                + self.traffic_counters.udp_requests.get(),
             total_ingress_bytes: self.traffic_counters.torrent_http_ingress.get()
                 + self.traffic_counters.web_http_ingress.get()
                 + self.traffic_counters.udp_ingress.get(),
@@ -284,6 +312,7 @@ mod tests {
 
         assert_eq!(snapshot.http.requests_per_minute, 0);
         assert_eq!(snapshot.udp.requests_per_minute, 1);
+        assert_eq!(snapshot.total_requests, 2);
         assert_eq!(snapshot.total_ingress_bytes, 110);
     }
 
@@ -300,19 +329,32 @@ mod tests {
         assert_eq!(snapshot.web_http.ingress_bytes, 10);
         assert_eq!(snapshot.http.ingress_bytes, 110);
         assert_eq!(snapshot.udp.ingress_bytes, 1);
+        assert_eq!(snapshot.total_requests, 3);
         assert_eq!(snapshot.total_ingress_bytes, 111);
     }
 
     #[test]
-    fn given_requests_in_rolling_window_when_rate_requested_then_returns_requests_per_second() {
+    fn given_requests_when_snapshotted_then_process_lifetime_total_is_returned() {
         let metrics = AppMetrics::new().expect("metrics should initialize");
         for _ in 0..120 {
             metrics.record_traffic_at("torrent_http", 1, 1, 1_000);
         }
 
+        assert_eq!(metrics.traffic_snapshot_at(1_000).total_requests, 120);
+    }
+
+    #[test]
+    fn given_requests_in_rolling_window_when_rate_requested_then_total_rate_is_returned() {
+        let metrics = AppMetrics::new().expect("metrics should initialize");
+        for _ in 0..60 {
+            metrics.record_traffic_at("torrent_http", 1, 1, 1_000);
+            metrics.record_traffic_at("web_http", 1, 1, 1_000);
+            metrics.record_traffic_at("udp", 1, 1, 1_000);
+        }
+
         assert_eq!(
             metrics.traffic_snapshot_at(1_000).requests_per_second(),
-            2.0
+            3.0
         );
     }
 
@@ -331,6 +373,7 @@ mod tests {
         });
 
         let snapshot = metrics.traffic_snapshot_at(1_000);
+        assert_eq!(snapshot.total_requests, 8_000);
         assert_eq!(snapshot.torrent_http.requests_per_minute, 8_000);
         assert_eq!(snapshot.torrent_http.ingress_bytes, 16_000);
         assert_eq!(snapshot.torrent_http.egress_bytes, 24_000);
