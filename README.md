@@ -79,6 +79,134 @@ Set `log_filter` to a tracing directive such as `hive_tracker=trace` for maximum
 detail or `hive_tracker=info` for quieter operational logs. Multiple directives
 can be comma-separated.
 
+The dashboard, aggregate statistics, and health endpoint remain public. The UDP
+tracker uses short-lived source-bound connection IDs and rate limiting, but BEP
+15 does not define bearer authentication.
+
+## Docker
+
+The published image is available from Docker Hub as
+`prashantkhandelwal/hive`. It runs as a non-root user, exposes the dashboard and
+HTTP tracker on TCP port `3000`, exposes the UDP tracker on UDP port `6969`, and
+stores SQLite data under `/data`.
+
+Run the latest release with a persistent named volume and complete runtime
+configuration:
+
+```powershell
+docker run --detach `
+  --name hive `
+  --restart unless-stopped `
+  --pull always `
+  --publish 3000:3000/tcp `
+  --publish 6969:6969/udp `
+  --volume hive-data:/data `
+  --env "HIVE_PROTOCOL=both" `
+  --env "HIVE_ENABLE_HTTP_SCRAPE=true" `
+  --env "HIVE_ENABLE_UDP_SCRAPE=true" `
+  --env "HIVE_HTTP_ADDR=0.0.0.0:3000" `
+  --env "HIVE_UDP_ADDR=0.0.0.0:6969" `
+  --env "HIVE_DATABASE_PATH=/data/hive.db" `
+  --env "HIVE_AUTH_TOKEN=replace-with-a-strong-token" `
+  --env "HIVE_ANNOUNCE_INTERVAL=1800" `
+  --env "HIVE_PEER_TIMEOUT=3600" `
+  --env "HIVE_PERSISTENCE_INTERVAL=30" `
+  --env "HIVE_RATE_LIMIT_PER_MINUTE=500" `
+  --env "HIVE_LOG_FILTER=hive_tracker=info" `
+  prashantkhandelwal/hive:latest
+```
+
+An empty `HIVE_AUTH_TOKEN` disables HTTP bearer authentication. Supplying a
+token enables authentication for `/announce`, `/scrape`, and `/metrics`.
+
+Environment variables override values from `/etc/hive/hive.toml`:
+
+| Variable | Example | Purpose |
+| --- | --- | --- |
+| `HIVE_PROTOCOL` | `both` | Tracker listeners: `http`, `udp`, or `both` |
+| `HIVE_ENABLE_HTTP_SCRAPE` | `true` | Enable the HTTP scrape endpoint |
+| `HIVE_ENABLE_UDP_SCRAPE` | `true` | Enable the UDP scrape action |
+| `HIVE_HTTP_ADDR` | `0.0.0.0:3000` | HTTP listen address inside the container |
+| `HIVE_UDP_ADDR` | `0.0.0.0:6969` | UDP listen address inside the container |
+| `HIVE_DATABASE_PATH` | `/data/hive.db` | SQLite database path |
+| `HIVE_AUTH_TOKEN` | `change-me` | Optional HTTP bearer token |
+| `HIVE_ANNOUNCE_INTERVAL` | `1800` | Client reannounce interval in seconds |
+| `HIVE_PEER_TIMEOUT` | `3600` | Maximum idle peer age in seconds |
+| `HIVE_PERSISTENCE_INTERVAL` | `30` | Persistence interval in seconds |
+| `HIVE_RATE_LIMIT_PER_MINUTE` | `120` | Per-source-IP request allowance |
+| `HIVE_LOG_FILTER` | `hive_tracker=info` | Tracing filter |
+
+For secrets, prefer an environment file over placing the token in shell
+history. Copy `.env.example` to `.env`, update its values, and run:
+
+```powershell
+docker run --detach `
+  --name hive `
+  --restart unless-stopped `
+  --publish 3000:3000/tcp `
+  --publish 6969:6969/udp `
+  --volume hive-data:/data `
+  --env-file .env `
+  prashantkhandelwal/hive:latest
+```
+
+Alternatively, use the included Compose configuration:
+
+```powershell
+docker compose up --detach
+```
+
+Build a local image directly from the repository with:
+
+```powershell
+docker build --build-arg HIVE_VERSION=local --tag hive:local .
+```
+
+The container health check calls `http://127.0.0.1:3000/health`. Inspect it
+with:
+
+```powershell
+docker inspect --format "{{.State.Health.Status}}" hive
+```
+
+The default container configuration enables both tracker protocols and both
+scrape endpoints. To customize authentication or other settings, mount a
+configuration file at `/etc/hive/hive.toml`:
+
+```powershell
+docker run --detach --name hive `
+  --publish 3000:3000 `
+  --publish 6969:6969/udp `
+  --volume hive-data:/data `
+  --volume "${PWD}/hive.toml:/etc/hive/hive.toml:ro" `
+  prashantkhandelwal/hive:latest
+```
+
+Release tags publish Linux images for `amd64`, `arm64`, and `arm/v7`. A release
+such as `v1.2.3` publishes the tags `1.2.3`, `1.2`, `1`, and `latest`.
+Docker images are built and published by the separate **Docker Release**
+workflow; the **Release** workflow only builds and publishes binary archives.
+
+To publish an existing release tag manually, open **Actions → Docker Release →
+Run workflow** and enter a tag such as `v1.2.3`. The tag must already exist in
+the repository. You can also trigger it with GitHub CLI:
+
+```powershell
+gh workflow run docker-release.yml --ref main --field tag=v1.2.3
+gh run watch
+```
+
+To enable release publishing, add these GitHub Actions repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | Docker Hub user that can push to `prashantkhandelwal/hive` |
+| `DOCKERHUB_TOKEN` | Docker Hub access token with read/write permission |
+
+Create `prashantkhandelwal/hive` as a public Docker Hub repository before the
+first release. Create the access token in Docker Hub account settings. Do not
+use or commit the Docker Hub account password.
+
 ## Client URLs
 
 Use these tracker URLs with their corresponding protocols:

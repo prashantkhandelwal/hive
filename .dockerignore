@@ -1,0 +1,16 @@
+.git
+.github
+.env
+.idea
+.vscode
+benchmark-results
+debug
+target
+*.db
+*.db-shm
+*.db-wal
+*.pdb
+Dockerfile*
+compose*.yml
+compose*.yaml
+README.md
