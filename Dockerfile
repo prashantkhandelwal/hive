@@ -8,10 +8,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
 ARG HIVE_VERSION
+ARG TARGETARCH
+ARG TARGETVARIANT
 ENV HIVE_VERSION=${HIVE_VERSION}
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=hive-cargo-registry-${TARGETARCH}${TARGETVARIANT},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=hive-cargo-git-${TARGETARCH}${TARGETVARIANT},target=/usr/local/cargo/git \
     cargo build --locked --release
 
 FROM debian:bookworm-slim AS runtime
