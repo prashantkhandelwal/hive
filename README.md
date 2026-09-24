@@ -46,6 +46,9 @@ The single-page dashboard shows peers, seeders, leechers, torrents, completed
 downloads, and uptime. Its shared trend chart supports day, week, and month
 views. Metric snapshots and daily ingress and egress totals are stored in
 SQLite, so transfer totals can be summed across the selected period.
+The trend chart uses Apache ECharts 6.1.0 loaded from jsDelivr with a pinned
+version and subresource integrity hash, so chart rendering requires access to
+the CDN.
 
 Tracker population totals are maintained incrementally for constant-time
 telemetry updates. Dashboard history is cached in memory until a new snapshot
@@ -63,7 +66,6 @@ Hive reads configuration from `hive.toml` in the working directory.
 | `http_addr` | `0.0.0.0:3000` | Web UI and HTTP tracker listen address |
 | `udp_addr` | `0.0.0.0:6969` | UDP tracker listen address |
 | `database_path` | `hive.db` | SQLite database path |
-| `auth_token` | Unset | Optional HTTP bearer token |
 | `announce_interval` | `1800` | Client reannounce interval in seconds |
 | `peer_timeout` | `3600` | Maximum idle peer age in seconds |
 | `persistence_interval` | `30` | Snapshot interval in seconds |
@@ -76,13 +78,6 @@ command-line argument overrides `default_protocol` for the current process.
 Set `log_filter` to a tracing directive such as `hive_tracker=trace` for maximum
 detail or `hive_tracker=info` for quieter operational logs. Multiple directives
 can be comma-separated.
-
-When `auth_token` is set, `/announce`, `/scrape`, and `/metrics` require
-the following header:
-
-```http
-Authorization: Bearer your-token
-```
 
 The dashboard, aggregate statistics, and health endpoint remain public. The UDP
 tracker uses short-lived source-bound connection IDs and rate limiting, but BEP
@@ -233,6 +228,31 @@ specific torrents, repeat the percent-encoded `info_hash` query parameter. The
 response is binary bencoded tracker data (`application/x-bittorrent`), not
 human-readable text; use a bencode decoder rather than viewing it directly in a
 browser.
+
+Add `format=json` to have Hive decode the same bencoded scrape payload and
+return `application/json` instead:
+
+```text
+GET /scrape?format=json
+GET /scrape?info_hash=%00%01%02%03%04%05%06%07%08%09%0A%0B%0C%0D%0E%0F%10%11%12%13&format=json
+```
+
+JSON responses use lowercase hexadecimal info hashes as object keys:
+
+```json
+{
+  "files": {
+    "000102030405060708090a0b0c0d0e0f10111213": {
+      "complete": 4,
+      "downloaded": 12,
+      "incomplete": 2
+    }
+  }
+}
+```
+
+Omit `format` or use `format=bencode` to retain the standard BEP 48 binary
+response.
 
 ## Verification
 
