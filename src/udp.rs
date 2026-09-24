@@ -148,8 +148,9 @@ impl UdpTracker {
             left,
             last_seen: unix_timestamp(),
         };
-        let stats = self.state.announce(info_hash, peer, event);
-        let peers = self.state.peers(&info_hash, &peer_id, limit);
+        let (stats, peers) = self
+            .state
+            .announce_with_peers(info_hash, peer, event, limit);
         self.metrics.announce("udp", event_name(event));
         self.metrics
             .set_population(self.state.peer_count(), self.state.swarm_count());

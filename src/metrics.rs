@@ -4,7 +4,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use prometheus::{Encoder, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder};
+use prometheus::{
+    Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
+};
 use serde::Serialize;
 
 const TRAFFIC_WINDOW_SECONDS: u64 = 60;
@@ -48,11 +50,31 @@ struct TrafficWindow {
 }
 
 #[derive(Clone)]
+struct TrafficCounters {
+    torrent_http_ingress: IntCounter,
+    torrent_http_egress: IntCounter,
+    web_http_ingress: IntCounter,
+    web_http_egress: IntCounter,
+    udp_ingress: IntCounter,
+    udp_egress: IntCounter,
+}
+
+impl TrafficCounters {
+    fn select(&self, protocol: &str) -> (&IntCounter, &IntCounter) {
+        match protocol {
+            "torrent_http" => (&self.torrent_http_ingress, &self.torrent_http_egress),
+            "web_http" => (&self.web_http_ingress, &self.web_http_egress),
+            _ => (&self.udp_ingress, &self.udp_egress),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct AppMetrics {
     registry: Registry,
     requests: IntCounterVec,
     announce_events: IntCounterVec,
-    traffic_bytes: IntCounterVec,
+    traffic_counters: TrafficCounters,
     requests_per_minute: IntGaugeVec,
     active_peers: IntGauge,
     active_swarms: IntGauge,
@@ -96,12 +118,20 @@ impl AppMetrics {
         registry.register(Box::new(requests_per_minute.clone()))?;
         registry.register(Box::new(active_peers.clone()))?;
         registry.register(Box::new(active_swarms.clone()))?;
+        let traffic_counters = TrafficCounters {
+            torrent_http_ingress: traffic_bytes.with_label_values(&["torrent_http", "ingress"]),
+            torrent_http_egress: traffic_bytes.with_label_values(&["torrent_http", "egress"]),
+            web_http_ingress: traffic_bytes.with_label_values(&["web_http", "ingress"]),
+            web_http_egress: traffic_bytes.with_label_values(&["web_http", "egress"]),
+            udp_ingress: traffic_bytes.with_label_values(&["udp", "ingress"]),
+            udp_egress: traffic_bytes.with_label_values(&["udp", "egress"]),
+        };
 
         Ok(Self {
             registry,
             requests,
             announce_events,
-            traffic_bytes,
+            traffic_counters,
             requests_per_minute,
             active_peers,
             active_swarms,
@@ -159,12 +189,9 @@ impl AppMetrics {
         egress_bytes: u64,
         second: u64,
     ) {
-        self.traffic_bytes
-            .with_label_values(&[protocol, "ingress"])
-            .inc_by(ingress_bytes);
-        self.traffic_bytes
-            .with_label_values(&[protocol, "egress"])
-            .inc_by(egress_bytes);
+        let (ingress_counter, egress_counter) = self.traffic_counters.select(protocol);
+        ingress_counter.inc_by(ingress_bytes);
+        egress_counter.inc_by(egress_bytes);
 
         let Ok(mut window) = self.traffic_window.lock() else {
             return;
@@ -191,30 +218,12 @@ impl AppMetrics {
 
     fn traffic_snapshot_at(&self, second: u64) -> TrafficSnapshot {
         let mut snapshot = TrafficSnapshot {
-            total_ingress_bytes: self
-                .traffic_bytes
-                .with_label_values(&["torrent_http", "ingress"])
-                .get()
-                + self
-                    .traffic_bytes
-                .with_label_values(&["web_http", "ingress"])
-                .get()
-                + self
-                    .traffic_bytes
-                    .with_label_values(&["udp", "ingress"])
-                    .get(),
-            total_egress_bytes: self
-                .traffic_bytes
-                .with_label_values(&["torrent_http", "egress"])
-                .get()
-                + self
-                    .traffic_bytes
-                .with_label_values(&["web_http", "egress"])
-                .get()
-                + self
-                    .traffic_bytes
-                    .with_label_values(&["udp", "egress"])
-                    .get(),
+            total_ingress_bytes: self.traffic_counters.torrent_http_ingress.get()
+                + self.traffic_counters.web_http_ingress.get()
+                + self.traffic_counters.udp_ingress.get(),
+            total_egress_bytes: self.traffic_counters.torrent_http_egress.get()
+                + self.traffic_counters.web_http_egress.get()
+                + self.traffic_counters.udp_egress.get(),
             ..TrafficSnapshot::default()
         };
         if let Ok(mut window) = self.traffic_window.lock() {
@@ -305,5 +314,25 @@ mod tests {
             metrics.traffic_snapshot_at(1_000).requests_per_second(),
             2.0
         );
+    }
+
+    #[test]
+    fn given_concurrent_traffic_when_recorded_then_no_counts_are_lost() {
+        let metrics = AppMetrics::new().expect("metrics should initialize");
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let metrics = metrics.clone();
+                scope.spawn(move || {
+                    for _ in 0..1_000 {
+                        metrics.record_traffic_at("torrent_http", 2, 3, 1_000);
+                    }
+                });
+            }
+        });
+
+        let snapshot = metrics.traffic_snapshot_at(1_000);
+        assert_eq!(snapshot.torrent_http.requests_per_minute, 8_000);
+        assert_eq!(snapshot.torrent_http.ingress_bytes, 16_000);
+        assert_eq!(snapshot.torrent_http.egress_bytes, 24_000);
     }
 }

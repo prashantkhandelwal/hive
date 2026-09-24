@@ -211,8 +211,17 @@ async fn periodic_maintenance(
     loop {
         ticker.tick().await;
         let peers_before = state.peer_count();
-        state.remove_stale(peer_timeout);
-        rate_limiter.remove_idle();
+        let cleanup_state = Arc::clone(&state);
+        let cleanup_rate_limiter = Arc::clone(&rate_limiter);
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            cleanup_state.remove_stale(peer_timeout);
+            cleanup_rate_limiter.remove_idle();
+        })
+        .await
+        {
+            error!(%error, "tracker cleanup task failed");
+            continue;
+        }
         if let Err(error) = persistence.save(&state).await {
             error!(%error, "failed to persist tracker state");
         } else if let Err(error) = persistence
