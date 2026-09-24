@@ -43,12 +43,11 @@ when `udp` is selected; in that mode, the read-only HTTP scrape route remains
 available while HTTP announces are disabled.
 
 The single-page dashboard shows peers, seeders, leechers, torrents, completed
-downloads, uptime, and the total HTTP and UDP request rate averaged over the
-rolling previous 60 seconds. Its shared trend chart supports day, week, and
-month views. Metric snapshots and daily ingress and egress totals are stored in
-SQLite, so transfer totals can be summed across the selected period. Lifetime
-request counters since the current process started remain available through
-Prometheus.
+downloads, and uptime. Its shared trend chart supports day, week, and month
+views. Metric snapshots and daily ingress and egress totals are stored in
+SQLite, so transfer totals can be summed across the selected period. Request
+rates and lifetime counters since the current process started remain available
+through Prometheus.
 The trend chart uses Apache ECharts 6.1.0 loaded from jsDelivr with a pinned
 version and subresource integrity hash, so chart rendering requires access to
 the CDN.
