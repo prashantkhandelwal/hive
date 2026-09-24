@@ -55,8 +55,46 @@ pub struct StateChange {
 }
 
 #[derive(Default)]
+struct Swarm {
+    peers: HashMap<PeerId, Peer>,
+    complete: usize,
+    incomplete: usize,
+}
+
+impl Swarm {
+    fn insert(&mut self, peer: Peer) -> Option<Peer> {
+        let previous = self.peers.insert(peer.peer_id, peer.clone());
+        self.adjust_counts(previous.as_ref(), Some(&peer));
+        previous
+    }
+
+    fn remove(&mut self, peer_id: &PeerId) -> Option<Peer> {
+        let removed = self.peers.remove(peer_id);
+        self.adjust_counts(removed.as_ref(), None);
+        removed
+    }
+
+    fn adjust_counts(&mut self, previous: Option<&Peer>, current: Option<&Peer>) {
+        if let Some(peer) = previous {
+            if peer.left == 0 {
+                self.complete = self.complete.saturating_sub(1);
+            } else {
+                self.incomplete = self.incomplete.saturating_sub(1);
+            }
+        }
+        if let Some(peer) = current {
+            if peer.left == 0 {
+                self.complete += 1;
+            } else {
+                self.incomplete += 1;
+            }
+        }
+    }
+}
+
+#[derive(Default)]
 pub struct TrackerState {
-    swarms: DashMap<InfoHash, HashMap<PeerId, Peer>>,
+    swarms: DashMap<InfoHash, Swarm>,
     completed: DashMap<InfoHash, u64>,
     dirty: DashMap<InfoHash, u64>,
     peer_count: AtomicUsize,
@@ -75,10 +113,13 @@ impl TrackerState {
             self.torrent_count.fetch_add(1, Ordering::Relaxed);
         }
         let previous = match self.swarms.entry(info_hash) {
-            Entry::Occupied(mut entry) => entry.get_mut().insert(peer.peer_id, peer.clone()),
+            Entry::Occupied(mut entry) => entry.get_mut().insert(peer.clone()),
             Entry::Vacant(entry) => {
                 self.swarm_count.fetch_add(1, Ordering::Relaxed);
-                entry.insert(HashMap::from([(peer.peer_id, peer.clone())]));
+                let mut swarm = Swarm::default();
+                let previous = swarm.insert(peer.clone());
+                entry.insert(swarm);
+                debug_assert!(previous.is_none());
                 None
             }
         };
@@ -98,6 +139,16 @@ impl TrackerState {
     }
 
     pub fn announce(&self, info_hash: InfoHash, peer: Peer, event: AnnounceEvent) -> SwarmStats {
+        self.announce_with_peers(info_hash, peer, event, 0).0
+    }
+
+    pub fn announce_with_peers(
+        &self,
+        info_hash: InfoHash,
+        peer: Peer,
+        event: AnnounceEvent,
+        limit: usize,
+    ) -> (SwarmStats, Vec<Peer>) {
         if event != AnnounceEvent::Stopped {
             if let Entry::Vacant(entry) = self.completed.entry(info_hash) {
                 entry.insert(0);
@@ -106,11 +157,13 @@ impl TrackerState {
         }
 
         let mut should_record_completion = false;
+        let mut complete = 0;
+        let mut incomplete = 0;
         if event == AnnounceEvent::Stopped {
             if let Entry::Occupied(mut entry) = self.swarms.entry(info_hash) {
                 let removed = entry.get_mut().remove(&peer.peer_id);
                 self.update_peer_counters(removed.as_ref(), None);
-                if entry.get().is_empty() {
+                if entry.get().peers.is_empty() {
                     entry.remove();
                     decrement_atomic_usize(&self.swarm_count, 1);
                     if let Entry::Occupied(entry) = self.completed.entry(info_hash) {
@@ -119,14 +172,27 @@ impl TrackerState {
                             decrement_atomic_usize(&self.torrent_count, 1);
                         }
                     }
+                } else {
+                    complete = entry.get().complete;
+                    incomplete = entry.get().incomplete;
                 }
             }
         } else {
             let previous = match self.swarms.entry(info_hash) {
-                Entry::Occupied(mut entry) => entry.get_mut().insert(peer.peer_id, peer.clone()),
+                Entry::Occupied(mut entry) => {
+                    let previous = entry.get_mut().insert(peer.clone());
+                    complete = entry.get().complete;
+                    incomplete = entry.get().incomplete;
+                    previous
+                }
                 Entry::Vacant(entry) => {
                     self.swarm_count.fetch_add(1, Ordering::Relaxed);
-                    entry.insert(HashMap::from([(peer.peer_id, peer.clone())]));
+                    let mut swarm = Swarm::default();
+                    let previous = swarm.insert(peer.clone());
+                    complete = swarm.complete;
+                    incomplete = swarm.incomplete;
+                    entry.insert(swarm);
+                    debug_assert!(previous.is_none());
                     None
                 }
             };
@@ -149,22 +215,27 @@ impl TrackerState {
         }
 
         self.mark_changed(info_hash);
-        self.stats(&info_hash)
+        let downloaded = self
+            .completed
+            .get(&info_hash)
+            .map(|value| *value)
+            .unwrap_or(0);
+        let peers = self.peers(&info_hash, &peer.peer_id, limit);
+        (
+            SwarmStats {
+                complete,
+                incomplete,
+                downloaded,
+            },
+            peers,
+        )
     }
 
     pub fn stats(&self, info_hash: &InfoHash) -> SwarmStats {
         let (complete, incomplete) = self
             .swarms
             .get(info_hash)
-            .map(|swarm| {
-                swarm.values().fold((0, 0), |(seeders, leechers), peer| {
-                    if peer.left == 0 {
-                        (seeders + 1, leechers)
-                    } else {
-                        (seeders, leechers + 1)
-                    }
-                })
-            })
+            .map(|swarm| (swarm.complete, swarm.incomplete))
             .unwrap_or_default();
 
         SwarmStats {
@@ -181,14 +252,7 @@ impl TrackerState {
     pub fn peers(&self, info_hash: &InfoHash, exclude: &PeerId, limit: usize) -> Vec<Peer> {
         self.swarms
             .get(info_hash)
-            .map(|swarm| {
-                swarm
-                    .values()
-                    .filter(|peer| &peer.peer_id != exclude)
-                    .take(limit)
-                    .cloned()
-                    .collect()
-            })
+            .map(|swarm| collect_peers(&swarm, exclude, limit))
             .unwrap_or_default()
     }
 
@@ -209,21 +273,23 @@ impl TrackerState {
         let mut removed_leechers = 0;
         let mut changed = HashSet::new();
         self.swarms.retain(|info_hash, swarm| {
-            let before = swarm.len();
-            let seeders_before = swarm.values().filter(|peer| peer.left == 0).count();
-            swarm.retain(|_, peer| peer.last_seen >= cutoff);
-            let removed = before - swarm.len();
+            let before = swarm.peers.len();
+            let seeders_before = swarm.complete;
+            swarm.peers.retain(|_, peer| peer.last_seen >= cutoff);
+            let removed = before - swarm.peers.len();
             if removed > 0 {
-                let seeders_after = swarm.values().filter(|peer| peer.left == 0).count();
+                let seeders_after = swarm.peers.values().filter(|peer| peer.left == 0).count();
+                swarm.complete = seeders_after;
+                swarm.incomplete = swarm.peers.len() - seeders_after;
                 removed_peers += removed;
                 removed_seeders += seeders_before - seeders_after;
                 removed_leechers += removed - (seeders_before - seeders_after);
                 changed.insert(*info_hash);
             }
-            if swarm.is_empty() {
+            if swarm.peers.is_empty() {
                 decrement_atomic_usize(&self.swarm_count, 1);
             }
-            !swarm.is_empty()
+            !swarm.peers.is_empty()
         });
         decrement_atomic_usize(&self.peer_count, removed_peers);
         decrement_atomic_usize(&self.seeder_count, removed_seeders);
@@ -274,7 +340,7 @@ impl TrackerState {
                 let peers = self
                     .swarms
                     .get(&info_hash)
-                    .map(|swarm| swarm.values().cloned().collect())
+                    .map(|swarm| swarm.peers.values().cloned().collect())
                     .unwrap_or_default();
                 StateChange {
                     info_hash,
@@ -327,6 +393,16 @@ impl TrackerState {
             &self.leecher_count
         }
     }
+}
+
+fn collect_peers(swarm: &Swarm, exclude: &PeerId, limit: usize) -> Vec<Peer> {
+    swarm
+        .peers
+        .values()
+        .filter(|peer| &peer.peer_id != exclude)
+        .take(limit)
+        .cloned()
+        .collect()
 }
 
 fn decrement_atomic_usize(value: &AtomicUsize, amount: usize) {
@@ -442,6 +518,22 @@ mod tests {
         state.announce(info_hash, peer(1, 0), AnnounceEvent::Completed);
 
         assert_eq!(state.stats(&info_hash).downloaded, 1);
+    }
+
+    #[test]
+    fn given_announce_with_peer_limit_when_processed_then_stats_and_peers_share_updated_state() {
+        let state = TrackerState::default();
+        let info_hash = [13; 20];
+        state.announce(info_hash, peer(1, 0), AnnounceEvent::Started);
+        state.announce(info_hash, peer(2, 50), AnnounceEvent::Started);
+
+        let (stats, peers) =
+            state.announce_with_peers(info_hash, peer(3, 25), AnnounceEvent::Started, 1);
+
+        assert_eq!(stats.complete, 1);
+        assert_eq!(stats.incomplete, 2);
+        assert_eq!(peers.len(), 1);
+        assert_ne!(peers[0].peer_id, [3; 20]);
     }
 
     #[test]

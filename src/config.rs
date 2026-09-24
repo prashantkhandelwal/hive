@@ -97,7 +97,7 @@ impl Default for FileConfig {
             peer_timeout: 3600,
             persistence_interval: 30,
             rate_limit_per_minute: 120,
-            log_filter: "hive_tracker=debug".to_owned(),
+            log_filter: "hive_tracker=info".to_owned(),
         }
     }
 }

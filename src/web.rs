@@ -7,7 +7,7 @@ use std::{
 };
 
 use axum::{
-    body::{to_bytes, Body},
+    body::{Body, HttpBody},
     extract::{ConnectInfo, Query, RawQuery, Request, State},
     http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
@@ -144,57 +144,51 @@ async fn observe_traffic(
     request: Request,
     next: Next,
 ) -> Response {
-    let started_at = Instant::now();
-    let method = request.method().clone();
-    let path = request.uri().path().to_owned();
-    let traffic_kind = match path.as_str() {
+    let debug_context = tracing::enabled!(tracing::Level::DEBUG).then(|| {
+        (
+            Instant::now(),
+            request.method().clone(),
+            request.uri().path().to_owned(),
+        )
+    });
+    let traffic_kind = match request.uri().path() {
         "/announce" | "/scrape" => "torrent_http",
         _ => "web_http",
     };
     let metadata_bytes = request.method().as_str().len()
-        + request.uri().to_string().len()
+        + request.uri().path().len()
+        + request
+            .uri()
+            .query()
+            .map(|query| query.len() + 1)
+            .unwrap_or_default()
         + request
             .headers()
             .iter()
             .map(|(name, value)| name.as_str().len() + value.as_bytes().len())
             .sum::<usize>();
-    let (parts, body) = request.into_parts();
-    let request_body = match to_bytes(body, 1024 * 1024).await {
-        Ok(body) => body,
-        Err(_) => {
-            let response =
-                (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
-            metrics.record_traffic(traffic_kind, metadata_bytes, 22);
-            return response;
-        }
-    };
-    let ingress_bytes = metadata_bytes + request_body.len();
-    let response = next
-        .run(Request::from_parts(parts, Body::from(request_body)))
-        .await;
-    let (parts, body) = response.into_parts();
-    let response_body = match to_bytes(body, 8 * 1024 * 1024).await {
-        Ok(body) => body,
-        Err(_) => {
-            metrics.record_traffic(traffic_kind, ingress_bytes, 0);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "response body unavailable",
-            )
-                .into_response();
-        }
-    };
-    metrics.record_traffic(traffic_kind, ingress_bytes, response_body.len());
-    debug!(
-        %method,
-        %path,
-        status = %parts.status,
-        ingress_bytes,
-        egress_bytes = response_body.len(),
-        elapsed_ms = started_at.elapsed().as_millis(),
-        "HTTP request completed"
-    );
-    Response::from_parts(parts, Body::from(response_body))
+    let request_body_bytes = request.body().size_hint().exact().unwrap_or_default() as usize;
+    if request_body_bytes > 1024 * 1024 {
+        let response = (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+        metrics.record_traffic(traffic_kind, metadata_bytes, 22);
+        return response;
+    }
+    let ingress_bytes = metadata_bytes + request_body_bytes;
+    let response = next.run(request).await;
+    let egress_bytes = response.body().size_hint().exact().unwrap_or_default() as usize;
+    metrics.record_traffic(traffic_kind, ingress_bytes, egress_bytes);
+    if let Some((started_at, method, path)) = debug_context {
+        debug!(
+            %method,
+            %path,
+            status = %response.status(),
+            ingress_bytes,
+            egress_bytes,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "HTTP request completed"
+        );
+    }
+    response
 }
 
 async fn announce(
@@ -222,8 +216,9 @@ async fn announce(
         left,
         last_seen: unix_timestamp(),
     };
-    let stats = context.state.announce(info_hash, peer, event);
-    let peers = context.state.peers(&info_hash, &peer_id, numwant);
+    let (stats, peers) = context
+        .state
+        .announce_with_peers(info_hash, peer, event, numwant);
     context.metrics.announce("http", event_name(event));
     update_population(&context);
     context.metrics.request("http", "announce", "ok");

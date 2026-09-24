@@ -56,6 +56,23 @@ is committed, tracker persistence writes only changed torrents, and full HTTP
 scrape responses are cached for up to five seconds with mutation-based
 invalidation.
 
+The announce path is designed to stay bounded and in memory:
+
+* swarm seeder and leecher totals are updated incrementally rather than
+  rescanned for every announce;
+* peer responses remain capped by `numwant` (at most 200);
+* HTTP traffic accounting uses response size hints instead of buffering and
+  copying complete response bodies;
+* Prometheus traffic counters are pre-bound to avoid repeated label-map lookups
+  on every request; and
+* stale-peer scans run on Tokio's blocking pool so large cleanup passes do not
+  occupy asynchronous request workers.
+
+Hive deliberately retains SQLite persistence and IPv6 support rather than
+copying narrower in-memory-only tracker designs. Persistence is incremental and
+outside the announce path, while IPv4 and IPv6 compact peer lists are emitted
+separately.
+
 ## Configuration
 
 Hive reads configuration from `hive.toml` in the working directory.
@@ -70,14 +87,16 @@ Hive reads configuration from `hive.toml` in the working directory.
 | `peer_timeout` | `3600` | Maximum idle peer age in seconds |
 | `persistence_interval` | `30` | Snapshot interval in seconds |
 | `rate_limit_per_minute` | `120` | Per-source-IP request allowance |
-| `log_filter` | `hive_tracker=debug` | Tracing filter and verbosity |
+| `log_filter` | `hive_tracker=info` | Tracing filter and verbosity |
 
 Use `--config path/to/config.toml` to load another file. The `--protocol`
 command-line argument overrides `default_protocol` for the current process.
 
 Set `log_filter` to a tracing directive such as `hive_tracker=trace` for maximum
 detail or `hive_tracker=info` for quieter operational logs. Multiple directives
-can be comma-separated.
+can be comma-separated. Keep production deployments at `info` or quieter:
+per-request debug logging is intentionally opt-in because synchronous formatting
+and log output reduce announce throughput.
 
 ## Client URLs
 
