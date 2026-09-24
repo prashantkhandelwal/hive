@@ -1,0 +1,30 @@
+[Unit]
+Description=Hive BitTorrent Tracker
+Documentation=https://github.com/prashantkhandelwal/hive
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=hive
+WorkingDirectory=/var/lib/hive
+ExecStart=/usr/local/bin/hive-tracker --config /etc/hive/hive.toml
+EnvironmentFile=-/etc/hive/hive.env
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
