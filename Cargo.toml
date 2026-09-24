@@ -4,6 +4,9 @@ version = "0.1.1"
 edition = "2021"
 license = "MIT"
 
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
 [dependencies]
 anyhow = "1"
 axum = "0.8"
