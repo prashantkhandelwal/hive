@@ -88,6 +88,7 @@ struct StatisticsResponse {
     #[serde(flatten)]
     summary: TrackerSummary,
     uptime_seconds: u64,
+    total_requests: u64,
     requests_per_second: f64,
     history: DashboardHistory,
 }
@@ -313,6 +314,7 @@ async fn statistics(
         protocol: context.protocol,
         summary,
         uptime_seconds,
+        total_requests: traffic.total_requests,
         requests_per_second: traffic.requests_per_second(),
         history,
     }))
