@@ -105,9 +105,9 @@ can be comma-separated. Keep production deployments at `info` or quieter:
 per-request debug logging is intentionally opt-in because synchronous formatting
 and log output reduce announce throughput.
 
-The dashboard, aggregate statistics, and health endpoint remain public. The UDP
-tracker uses short-lived source-bound connection IDs and rate limiting, but BEP
-15 does not define bearer authentication.
+The dashboard, tracker endpoints, aggregate statistics, and health endpoint are
+public. Per-source-IP rate limiting protects HTTP and UDP tracker traffic, and
+the UDP tracker uses short-lived source-bound connection IDs.
 
 ## Linux systemd service
 
@@ -166,7 +166,6 @@ docker run --detach `
   --env "HIVE_HTTP_ADDR=0.0.0.0:3000" `
   --env "HIVE_UDP_ADDR=0.0.0.0:6969" `
   --env "HIVE_DATABASE_PATH=/data/hive.db" `
-  --env "HIVE_AUTH_TOKEN=replace-with-a-strong-token" `
   --env "HIVE_ANNOUNCE_INTERVAL=1800" `
   --env "HIVE_PEER_TIMEOUT=3600" `
   --env "HIVE_PERSISTENCE_INTERVAL=30" `
@@ -175,9 +174,6 @@ docker run --detach `
   --env "HIVE_LOG_FILTER=hive_tracker=info" `
   prashantkhandelwal/hive:latest
 ```
-
-An empty `HIVE_AUTH_TOKEN` disables HTTP bearer authentication. Supplying a
-token enables authentication for `/announce`, `/scrape`, and `/metrics`.
 
 Environment variables override values from `/etc/hive/hive.toml`:
 
@@ -189,7 +185,6 @@ Environment variables override values from `/etc/hive/hive.toml`:
 | `HIVE_HTTP_ADDR` | `0.0.0.0:3000` | HTTP listen address inside the container |
 | `HIVE_UDP_ADDR` | `0.0.0.0:6969` | UDP listen address inside the container |
 | `HIVE_DATABASE_PATH` | `/data/hive.db` | SQLite database path |
-| `HIVE_AUTH_TOKEN` | `change-me` | Optional HTTP bearer token |
 | `HIVE_ANNOUNCE_INTERVAL` | `1800` | Client reannounce interval in seconds |
 | `HIVE_PEER_TIMEOUT` | `3600` | Maximum idle peer age in seconds |
 | `HIVE_PERSISTENCE_INTERVAL` | `30` | Persistence interval in seconds |
@@ -197,8 +192,8 @@ Environment variables override values from `/etc/hive/hive.toml`:
 | `HIVE_MAX_CONCURRENT_HTTP_REQUESTS` | `128` | Maximum HTTP requests processed concurrently |
 | `HIVE_LOG_FILTER` | `hive_tracker=info` | Tracing filter |
 
-For secrets, prefer an environment file over placing the token in shell
-history. Copy `.env.example` to `.env`, update its values, and run:
+To keep reusable container settings outside shell history, copy `.env.example`
+to `.env`, update its values, and run:
 
 ```powershell
 docker run --detach `
@@ -231,8 +226,8 @@ docker inspect --format "{{.State.Health.Status}}" hive
 ```
 
 The default container configuration enables both tracker protocols and both
-scrape endpoints. To customize authentication or other settings, mount a
-configuration file at `/etc/hive/hive.toml`:
+scrape endpoints. To customize other settings, mount a configuration file at
+`/etc/hive/hive.toml`:
 
 ```powershell
 docker run --detach --name hive `
