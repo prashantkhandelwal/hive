@@ -119,6 +119,7 @@ async fn log_traffic(metrics: AppMetrics) {
         ticker.tick().await;
         let traffic = metrics.traffic_snapshot();
         info!(
+            requests_total = traffic.total_requests,
             ingress_bytes_total = traffic.total_ingress_bytes,
             egress_bytes_total = traffic.total_egress_bytes,
             torrent_http_requests_per_minute = traffic.torrent_http.requests_per_minute,
