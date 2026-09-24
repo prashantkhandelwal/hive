@@ -6,14 +6,14 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      tag:
-        description: Use "latest" or an existing release version such as v1.2.3
+      image_tag:
+        description: Docker image tag to publish, for example latest, test, or 1.2.3
         required: true
         default: latest
         type: string
 
 concurrency:
-  group: docker-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  group: docker-release-${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -23,34 +23,38 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Resolve release
+      - name: Resolve image tag
         id: release
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.ref_name }}
         run: |
-          if [[ "$REQUESTED_TAG" == "latest" ]]; then
-            RELEASE_TAG="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')"
-            IMAGE_TAG="latest"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            IMAGE_TAG="$REQUESTED_TAG"
           else
-            RELEASE_TAG="$REQUESTED_TAG"
-            if [[ "$RELEASE_TAG" != v* ]]; then
-              RELEASE_TAG="v$RELEASE_TAG"
-            fi
-            IMAGE_TAG="${RELEASE_TAG#v}"
+            IMAGE_TAG="${REQUESTED_TAG#v}"
           fi
 
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Release tag must use semantic version format such as v1.2.3"
+          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::Invalid Docker image tag: $IMAGE_TAG"
             exit 1
           fi
 
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
-          ref: ${{ steps.release.outputs.release_tag }}
+          ref: ${{ github.ref }}
+      - name: Validate build context
+        shell: bash
+        run: |
+          if [[ ! -f Dockerfile ]]; then
+            echo "::error::The selected ref does not contain a Dockerfile"
+            exit 1
+          fi
+          if [[ ! -f docker/hive.toml ]]; then
+            echo "::error::The selected ref does not contain docker/hive.toml"
+            exit 1
+          fi
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Sign in to Docker Hub
@@ -66,6 +70,6 @@ jobs:
           push: true
           tags: prashantkhandelwal/hive:${{ steps.release.outputs.image_tag }}
           build-args: |
-            HIVE_VERSION=${{ steps.release.outputs.release_tag }}
+            HIVE_VERSION=${{ steps.release.outputs.image_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
