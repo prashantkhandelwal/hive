@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use crate::{
     client,
     metrics::TrafficSnapshot,
-    state::{Peer, PeerId, TrackerState, TrackerSummary},
+    state::{InfoHash, Peer, PeerId, TrackerState, TrackerSummary},
 };
 
 pub type Result<T> = std::result::Result<T, PersistenceError>;
@@ -61,6 +61,15 @@ pub struct ClientStatistic {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TorrentStatistic {
+    pub info_hash: InfoHash,
+    pub peers: usize,
+    pub seeders: usize,
+    pub leechers: usize,
+    pub downloaded: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DashboardHistory {
     pub metrics: Vec<MetricPoint>,
     pub traffic: Vec<TrafficPoint>,
@@ -81,10 +90,17 @@ impl Persistence {
             .create_if_missing(true);
         let pool = SqlitePool::connect_with(options).await?;
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS swarms (info_hash BLOB PRIMARY KEY, downloaded INTEGER NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS swarms (
+                info_hash BLOB PRIMARY KEY,
+                peers INTEGER NOT NULL DEFAULT 0,
+                seeders INTEGER NOT NULL DEFAULT 0,
+                leechers INTEGER NOT NULL DEFAULT 0,
+                downloaded INTEGER NOT NULL
+            )",
         )
         .execute(&pool)
         .await?;
+        ensure_swarm_stat_columns(&pool).await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS peers (
                 info_hash BLOB NOT NULL,
@@ -165,6 +181,27 @@ impl Persistence {
             Ok(ClientStatistic {
                 client_name: row.try_get("client_name")?,
                 peer_count: positive_i64(row.try_get("peer_count")?),
+            })
+        })
+        .collect()
+    }
+
+    pub async fn torrent_statistics(&self) -> Result<Vec<TorrentStatistic>> {
+        sqlx::query(
+            "SELECT info_hash, peers, seeders, leechers, downloaded
+             FROM swarms
+             ORDER BY info_hash",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(TorrentStatistic {
+                info_hash: identifier(row.try_get("info_hash")?, "info_hash")?,
+                peers: positive_i64(row.try_get("peers")?) as usize,
+                seeders: positive_i64(row.try_get("seeders")?) as usize,
+                leechers: positive_i64(row.try_get("leechers")?) as usize,
+                downloaded: positive_i64(row.try_get("downloaded")?),
             })
         })
         .collect()
@@ -343,11 +380,23 @@ impl Persistence {
                     .execute(&mut *transaction)
                     .await?;
                 if let Some(downloaded) = change.downloaded {
+                    let peers = change.peers.len();
+                    let seeders = change.peers.iter().filter(|peer| peer.left == 0).count();
+                    let leechers = peers - seeders;
                     sqlx::query(
-                        "INSERT INTO swarms (info_hash, downloaded) VALUES (?, ?)
-                         ON CONFLICT(info_hash) DO UPDATE SET downloaded = excluded.downloaded",
+                        "INSERT INTO swarms (
+                            info_hash, peers, seeders, leechers, downloaded
+                         ) VALUES (?, ?, ?, ?, ?)
+                         ON CONFLICT(info_hash) DO UPDATE SET
+                            peers = excluded.peers,
+                            seeders = excluded.seeders,
+                            leechers = excluded.leechers,
+                            downloaded = excluded.downloaded",
                     )
                     .bind(change.info_hash.as_slice())
+                    .bind(sqlite_integer(peers as u64))
+                    .bind(sqlite_integer(seeders as u64))
+                    .bind(sqlite_integer(leechers as u64))
                     .bind(sqlite_integer(downloaded))
                     .execute(&mut *transaction)
                     .await?;
@@ -389,6 +438,30 @@ impl Persistence {
             .await
             .is_ok()
     }
+}
+
+async fn ensure_swarm_stat_columns(pool: &SqlitePool) -> Result<()> {
+    let columns = sqlx::query("PRAGMA table_info(swarms)")
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("name"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    for (column, definition) in [
+        ("peers", "INTEGER NOT NULL DEFAULT 0"),
+        ("seeders", "INTEGER NOT NULL DEFAULT 0"),
+        ("leechers", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !columns.iter().any(|existing| existing == column) {
+            sqlx::query(&format!(
+                "ALTER TABLE swarms ADD COLUMN {column} {definition}"
+            ))
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 fn identifier(bytes: Vec<u8>, field: &'static str) -> Result<[u8; 20]> {
@@ -529,6 +602,115 @@ mod tests {
         assert_eq!(restored.peer_count(), 1);
         assert_eq!(restored.torrent_count(), 1);
         assert_eq!(restored.peers(&second_hash, &[0; 20], 10).len(), 1);
+
+        database.pool.close().await;
+        drop(database);
+        std::fs::remove_file(database_path).expect("temporary database should be removed");
+    }
+
+    #[tokio::test]
+    async fn given_swarm_changes_when_saved_then_all_per_torrent_counts_are_persisted() {
+        use crate::state::{unix_timestamp, AnnounceEvent};
+
+        let database_path = std::env::temp_dir().join(format!(
+            "hive-torrent-statistics-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let database = Persistence::open(&database_path)
+            .await
+            .expect("temporary database should open");
+        let state = TrackerState::default();
+        let info_hash = [3; 20];
+        let peer = |peer_id, left| Peer {
+            peer_id: [peer_id; 20],
+            ip: "127.0.0.1".parse().expect("test address should parse"),
+            port: 6881,
+            left,
+            last_seen: unix_timestamp(),
+        };
+        state.announce(info_hash, peer(1, 100), AnnounceEvent::Started);
+        state.announce(info_hash, peer(2, 0), AnnounceEvent::Started);
+        state.announce(info_hash, peer(3, 50), AnnounceEvent::Started);
+        state.announce(info_hash, peer(1, 0), AnnounceEvent::Completed);
+
+        database
+            .save(&state)
+            .await
+            .expect("swarm statistics should persist");
+
+        assert_eq!(
+            database
+                .torrent_statistics()
+                .await
+                .expect("torrent statistics should load"),
+            vec![TorrentStatistic {
+                info_hash,
+                peers: 3,
+                seeders: 2,
+                leechers: 1,
+                downloaded: 1,
+            }]
+        );
+
+        database.pool.close().await;
+        drop(database);
+        std::fs::remove_file(database_path).expect("temporary database should be removed");
+    }
+
+    #[tokio::test]
+    async fn given_legacy_database_when_opened_then_swarm_stat_columns_are_added() {
+        let database_path = std::env::temp_dir().join(format!(
+            "hive-legacy-statistics-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let options = SqliteConnectOptions::new()
+            .filename(&database_path)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options)
+            .await
+            .expect("legacy database should open");
+        sqlx::query(
+            "CREATE TABLE swarms (
+                info_hash BLOB PRIMARY KEY,
+                downloaded INTEGER NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy swarm table should be created");
+        sqlx::query("INSERT INTO swarms (info_hash, downloaded) VALUES (?, ?)")
+            .bind([9_u8; 20].as_slice())
+            .bind(4_i64)
+            .execute(&pool)
+            .await
+            .expect("legacy swarm should be inserted");
+        pool.close().await;
+
+        let database = Persistence::open(&database_path)
+            .await
+            .expect("legacy database should migrate");
+
+        assert_eq!(
+            database
+                .torrent_statistics()
+                .await
+                .expect("migrated statistics should load"),
+            vec![TorrentStatistic {
+                info_hash: [9; 20],
+                peers: 0,
+                seeders: 0,
+                leechers: 0,
+                downloaded: 4,
+            }]
+        );
 
         database.pool.close().await;
         drop(database);

@@ -300,6 +300,11 @@ background task. It stores one row per client in the `client_statistics`
 database table and increments `peer_count` for every accepted announce.
 Unrecognized peer IDs are counted as `Unknown`.
 
+The `swarms` database table stores the current peer, seeder, leecher, and
+completed-download counts for every known info hash. These values are refreshed
+with the rest of the tracker state at the configured `persistence_interval` and
+on graceful shutdown.
+
 Calling `/scrape` without an `info_hash` returns a full scrape. To request only
 specific torrents, repeat the percent-encoded `info_hash` query parameter. The
 response is binary bencoded tracker data (`application/x-bittorrent`), not
