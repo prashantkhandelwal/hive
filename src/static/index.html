@@ -121,7 +121,7 @@
         .empty[hidden] { display: none; }
         .transfer {
             display: grid;
-            grid-template-columns: 1.3fr repeat(3, 1fr);
+            grid-template-columns: 1.3fr repeat(2, 1fr);
             margin-top: 18px;
             border-top: 1px solid var(--line);
         }
@@ -194,7 +194,6 @@
                 <div><span class="transfer-label">Transfer period</span><strong class="transfer-value" id="transferPeriod">Today</strong></div>
                 <div><span class="transfer-label">Total ingress</span><strong class="transfer-value" id="ingress">-</strong></div>
                 <div><span class="transfer-label">Total egress</span><strong class="transfer-value" id="egress">-</strong></div>
-                <div><span class="transfer-label">Total requests / second</span><strong class="transfer-value" id="requestsPerSecond">-</strong></div>
             </div>
         </section>
         <footer><span id="protocol">Active protocol: -</span><span>Powered by <a href="https://github.com/prashantkhandelwal/hive">Hive</a> <span id="version">-</span></span><span>Daily transfer totals are stored in SQLite</span></footer>
@@ -319,7 +318,6 @@
                 byId('uptime').textContent = formatDuration(data.uptime_seconds);
                 byId('ingress').textContent = formatBytes(data.history.total_ingress_bytes);
                 byId('egress').textContent = formatBytes(data.history.total_egress_bytes);
-                byId('requestsPerSecond').textContent = data.requests_per_second.toFixed(2);
                 byId('transferPeriod').textContent = periods[activePeriod];
                 byId('protocol').textContent = `Active protocol: ${data.protocol.toUpperCase()}`;
                 byId('version').textContent = 'v' + data.version;
