@@ -1,13 +1,14 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap},
-    fmt::Write as _,
+    io::Write as _,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use axum::{
-    body::{Body, HttpBody},
+    body::{Body, Bytes, HttpBody},
     extract::{ConnectInfo, Query, RawQuery, Request, State},
     http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
@@ -52,11 +53,11 @@ pub struct ScrapeCache {
 struct CachedScrape {
     revision: u64,
     expires_at: Instant,
-    body: Vec<u8>,
+    body: Bytes,
 }
 
 impl ScrapeCache {
-    fn get(&self, revision: u64) -> Option<Vec<u8>> {
+    fn get(&self, revision: u64) -> Option<Bytes> {
         self.entry.lock().ok().and_then(|entry| {
             entry
                 .as_ref()
@@ -65,7 +66,7 @@ impl ScrapeCache {
         })
     }
 
-    fn insert(&self, revision: u64, body: Vec<u8>) {
+    fn insert(&self, revision: u64, body: Bytes) {
         if let Ok(mut entry) = self.entry.lock() {
             *entry = Some(CachedScrape {
                 revision,
@@ -250,14 +251,14 @@ async fn scrape(
                 .iter()
                 .map(|value| identifier(value, "info_hash"))
                 .collect::<Result<Vec<_>, _>>()?;
-            scrape_payload(&context.state, hashes)
+            Bytes::from(scrape_payload(&context.state, hashes))
         }
         None => {
             let revision = context.state.revision();
             if let Some(body) = context.scrape_cache.get(revision) {
                 body
             } else {
-                let body = scrape_payload(&context.state, context.state.info_hashes());
+                let body = Bytes::from(scrape_payload(&context.state, context.state.info_hashes()));
                 context.scrape_cache.insert(revision, body.clone());
                 body
             }
@@ -381,14 +382,19 @@ fn update_population(context: &AppContext) {
         .set_population(context.state.peer_count(), context.state.swarm_count());
 }
 
-type QueryParams = HashMap<String, Vec<Vec<u8>>>;
+type QueryParams<'a> = HashMap<Cow<'a, str>, Vec<Cow<'a, [u8]>>>;
 
-fn parse_query(query: &str) -> Result<QueryParams, ApiError> {
+fn parse_query(query: &str) -> Result<QueryParams<'_>, ApiError> {
     let mut params = HashMap::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = String::from_utf8(percent_decode(key)?)
-            .map_err(|_| ApiError::bad_request("query key is not valid UTF-8"))?;
+        let key = match percent_decode(key)? {
+            Cow::Borrowed(_) => Cow::Borrowed(key),
+            Cow::Owned(key) => Cow::Owned(
+                String::from_utf8(key)
+                    .map_err(|_| ApiError::bad_request("query key is not valid UTF-8"))?,
+            ),
+        };
         params
             .entry(key)
             .or_insert_with(Vec::new)
@@ -397,8 +403,11 @@ fn parse_query(query: &str) -> Result<QueryParams, ApiError> {
     Ok(params)
 }
 
-fn percent_decode(value: &str) -> Result<Vec<u8>, ApiError> {
+fn percent_decode(value: &str) -> Result<Cow<'_, [u8]>, ApiError> {
     let bytes = value.as_bytes();
+    if !bytes.iter().any(|byte| matches!(byte, b'%' | b'+')) {
+        return Ok(Cow::Borrowed(bytes));
+    }
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
@@ -420,7 +429,7 @@ fn percent_decode(value: &str) -> Result<Vec<u8>, ApiError> {
             }
         }
     }
-    Ok(decoded)
+    Ok(Cow::Owned(decoded))
 }
 
 fn hex_digit(value: u8) -> Result<u8, ApiError> {
@@ -432,7 +441,7 @@ fn hex_digit(value: u8) -> Result<u8, ApiError> {
     }
 }
 
-fn required_identifier(params: &QueryParams, name: &'static str) -> Result<[u8; 20], ApiError> {
+fn required_identifier(params: &QueryParams<'_>, name: &'static str) -> Result<[u8; 20], ApiError> {
     identifier(
         first(params, name).ok_or_else(|| ApiError::bad_request(format!("missing {name}")))?,
         name,
@@ -446,14 +455,14 @@ fn identifier(value: &[u8], name: &'static str) -> Result<[u8; 20], ApiError> {
         .map_err(|_| ApiError::bad_request(format!("{name} must be 20 bytes, got {length}")))
 }
 
-fn required_number<T>(params: &QueryParams, name: &'static str) -> Result<T, ApiError>
+fn required_number<T>(params: &QueryParams<'_>, name: &'static str) -> Result<T, ApiError>
 where
     T: std::str::FromStr,
 {
     optional_number(params, name)?.ok_or_else(|| ApiError::bad_request(format!("missing {name}")))
 }
 
-fn optional_number<T>(params: &QueryParams, name: &'static str) -> Result<Option<T>, ApiError>
+fn optional_number<T>(params: &QueryParams<'_>, name: &'static str) -> Result<Option<T>, ApiError>
 where
     T: std::str::FromStr,
 {
@@ -467,11 +476,11 @@ where
         .map_err(|_| ApiError::bad_request(format!("invalid {name}")))
 }
 
-fn first<'a>(params: &'a QueryParams, name: &str) -> Option<&'a [u8]> {
+fn first<'a>(params: &'a QueryParams<'_>, name: &str) -> Option<&'a [u8]> {
     params
         .get(name)
         .and_then(|values| values.first())
-        .map(Vec::as_slice)
+        .map(AsRef::as_ref)
 }
 
 fn parse_event(value: Option<&[u8]>) -> Result<AnnounceEvent, ApiError> {
@@ -534,13 +543,12 @@ fn scrape_payload(state: &TrackerState, mut hashes: Vec<InfoHash>) -> Vec<u8> {
         let stats = state.stats(&info_hash);
         output.extend_from_slice(b"20:");
         output.extend_from_slice(&info_hash);
-        output.extend_from_slice(
-            format!(
-                "d8:completei{}e10:downloadedi{}e10:incompletei{}ee",
-                stats.complete, stats.downloaded, stats.incomplete
-            )
-            .as_bytes(),
-        );
+        write!(
+            output,
+            "d8:completei{}e10:downloadedi{}e10:incompletei{}ee",
+            stats.complete, stats.downloaded, stats.incomplete
+        )
+        .expect("writing to a Vec cannot fail");
     }
     output.extend_from_slice(b"ee");
     output
@@ -613,9 +621,12 @@ fn scrape_integer(entries: &[(&[u8], BencodeValue<'_>)], key: &[u8]) -> Result<u
 }
 
 fn hex_string(value: &[u8]) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
     let mut encoded = String::with_capacity(value.len() * 2);
     for byte in value {
-        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        encoded.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
     }
     encoded
 }
@@ -648,14 +659,13 @@ fn append_peer_list(output: &mut Vec<u8>, peers: Vec<Peer>, requester: IpAddr) {
         append_bencoded_bytes(output, peer.ip.to_string().as_bytes());
         output.extend_from_slice(b"7:peer id20:");
         output.extend_from_slice(&peer.peer_id);
-        output.extend_from_slice(format!("4:porti{}ee", peer.port).as_bytes());
+        write!(output, "4:porti{}ee", peer.port).expect("writing to a Vec cannot fail");
     }
     output.push(b'e');
 }
 
 fn append_bencoded_bytes(output: &mut Vec<u8>, value: &[u8]) {
-    output.extend_from_slice(value.len().to_string().as_bytes());
-    output.push(b':');
+    write!(output, "{}:", value.len()).expect("writing to a Vec cannot fail");
     output.extend_from_slice(value);
 }
 
@@ -666,11 +676,12 @@ fn same_address_family(left: IpAddr, right: IpAddr) -> bool {
     )
 }
 
-fn bencoded_response(body: Vec<u8>) -> Response {
+fn bencoded_response(body: impl Into<Body>) -> Response {
     let headers = [(
         header::CONTENT_TYPE,
         HeaderValue::from_static(BITTORRENT_CONTENT_TYPE),
     )];
+    let body = body.into();
     (headers, body).into_response()
 }
 
@@ -717,10 +728,26 @@ mod tests {
     #[test]
     fn given_cached_scrape_when_revision_changes_then_cache_is_invalidated() {
         let cache = ScrapeCache::default();
-        cache.insert(1, b"cached".to_vec());
+        let body = Bytes::from(b"cached".to_vec());
+        let body_pointer = body.as_ptr();
+        cache.insert(1, body);
 
-        assert_eq!(cache.get(1), Some(b"cached".to_vec()));
+        let cached = cache.get(1).expect("cached body should be returned");
+        assert_eq!(cached, Bytes::from_static(b"cached"));
+        assert_eq!(cached.as_ptr(), body_pointer);
         assert_eq!(cache.get(2), None);
+    }
+
+    #[test]
+    fn given_unescaped_query_component_when_decoded_then_input_is_borrowed() {
+        assert!(matches!(
+            percent_decode("uploaded").expect("query component should decode"),
+            Cow::Borrowed(b"uploaded")
+        ));
+        assert!(matches!(
+            percent_decode("%75ploaded").expect("query component should decode"),
+            Cow::Owned(value) if value == b"uploaded"
+        ));
     }
 
     #[test]
