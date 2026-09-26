@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
             UdpTracker::bind(
                 config.udp_addr,
                 Arc::clone(&state),
+                persistence.clone(),
                 metrics.clone(),
                 Arc::clone(&rate_limiter),
                 config.announce_interval,

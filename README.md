@@ -295,6 +295,11 @@ default; send `compact=0` to request the original BEP 3 list of peer
 dictionaries. Compact IPv4 and IPv6 peers are returned under `peers` and
 `peers6`, respectively.
 
+Hive detects the client family from each HTTP and UDP announce peer ID in a
+background task. It stores one row per client in the `client_statistics`
+database table and increments `peer_count` for every accepted announce.
+Unrecognized peer IDs are counted as `Unknown`.
+
 Calling `/scrape` without an `info_hash` returns a full scrape. To request only
 specific torrents, repeat the percent-encoded `info_hash` query parameter. The
 response is binary bencoded tracker data (`application/x-bittorrent`), not

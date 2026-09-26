@@ -13,6 +13,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::{
+    client,
     metrics::TrafficSnapshot,
     state::{Peer, PeerId, TrackerState, TrackerSummary},
 };
@@ -51,6 +52,12 @@ pub struct TrafficPoint {
     pub day: String,
     pub ingress_bytes: u64,
     pub egress_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ClientStatistic {
+    pub client_name: String,
+    pub peer_count: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -113,11 +120,54 @@ impl Persistence {
         )
         .execute(&pool)
         .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS client_statistics (
+                client_name TEXT PRIMARY KEY,
+                peer_count INTEGER NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await?;
         Ok(Self {
             pool,
             traffic_checkpoint: Arc::new(Mutex::new(TrafficCheckpoint::default())),
             history_cache: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    pub async fn record_client_announce(&self, peer_id: PeerId) -> Result<()> {
+        let client_name = client::detect(peer_id);
+        sqlx::query(
+            "INSERT INTO client_statistics (client_name, peer_count)
+             VALUES (?, 1)
+             ON CONFLICT(client_name) DO UPDATE SET
+                peer_count = CASE
+                    WHEN peer_count < 9223372036854775807 THEN peer_count + 1
+                    ELSE peer_count
+                END",
+        )
+        .bind(client_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn client_statistics(&self) -> Result<Vec<ClientStatistic>> {
+        sqlx::query(
+            "SELECT client_name, peer_count
+             FROM client_statistics
+             ORDER BY peer_count DESC, client_name",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(ClientStatistic {
+                client_name: row.try_get("client_name")?,
+                peer_count: positive_i64(row.try_get("peer_count")?),
+            })
+        })
+        .collect()
     }
 
     pub async fn record_dashboard_snapshot(
@@ -479,6 +529,57 @@ mod tests {
         assert_eq!(restored.peer_count(), 1);
         assert_eq!(restored.torrent_count(), 1);
         assert_eq!(restored.peers(&second_hash, &[0; 20], 10).len(), 1);
+
+        database.pool.close().await;
+        drop(database);
+        std::fs::remove_file(database_path).expect("temporary database should be removed");
+    }
+
+    #[tokio::test]
+    async fn given_repeated_client_announces_when_recorded_then_peer_count_is_incremented() {
+        let database_path = std::env::temp_dir().join(format!(
+            "hive-client-statistics-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let database = Persistence::open(&database_path)
+            .await
+            .expect("temporary database should open");
+        let mut qbittorrent_peer_id = [b'-'; 20];
+        qbittorrent_peer_id[..8].copy_from_slice(b"-qB4500-");
+
+        database
+            .record_client_announce(qbittorrent_peer_id)
+            .await
+            .expect("first client announce should persist");
+        database
+            .record_client_announce(qbittorrent_peer_id)
+            .await
+            .expect("second client announce should persist");
+        database
+            .record_client_announce([0xff; 20])
+            .await
+            .expect("unknown client announce should persist");
+
+        assert_eq!(
+            database
+                .client_statistics()
+                .await
+                .expect("client statistics should load"),
+            vec![
+                ClientStatistic {
+                    client_name: "qBittorrent".to_owned(),
+                    peer_count: 2,
+                },
+                ClientStatistic {
+                    client_name: "Unknown".to_owned(),
+                    peer_count: 1,
+                },
+            ]
+        );
 
         database.pool.close().await;
         drop(database);

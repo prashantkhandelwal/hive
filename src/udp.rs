@@ -7,10 +7,11 @@ use std::{
 };
 
 use tokio::{net::UdpSocket, sync::watch};
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::{
     metrics::AppMetrics,
+    persistence::Persistence,
     rate_limit::RateLimiter,
     state::{unix_timestamp, AnnounceEvent, Peer, TrackerState},
 };
@@ -24,6 +25,7 @@ const ACTION_ERROR: u32 = 3;
 pub struct UdpTracker {
     socket: UdpSocket,
     state: Arc<TrackerState>,
+    persistence: Persistence,
     metrics: AppMetrics,
     rate_limiter: Arc<RateLimiter>,
     announce_interval: u32,
@@ -35,6 +37,7 @@ impl UdpTracker {
     pub async fn bind(
         address: SocketAddr,
         state: Arc<TrackerState>,
+        persistence: Persistence,
         metrics: AppMetrics,
         rate_limiter: Arc<RateLimiter>,
         announce_interval: u32,
@@ -48,6 +51,7 @@ impl UdpTracker {
         Ok(Self {
             socket,
             state,
+            persistence,
             metrics,
             rate_limiter,
             announce_interval,
@@ -141,6 +145,12 @@ impl UdpTracker {
         if port == 0 {
             return error_response(transaction_id, "invalid peer port");
         }
+        let client_persistence = self.persistence.clone();
+        tokio::spawn(async move {
+            if let Err(error) = client_persistence.record_client_announce(peer_id).await {
+                error!(%error, "failed to persist UDP announce client");
+            }
+        });
         let peer = Peer {
             peer_id,
             ip: remote.ip(),
