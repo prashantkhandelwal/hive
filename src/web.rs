@@ -91,12 +91,10 @@ struct StatisticsResponse {
     summary: TrackerSummary,
     uptime_seconds: u64,
     total_requests: u64,
-    requests_per_second: f64,
-    history: DashboardHistory,
 }
 
 #[derive(Default, Deserialize)]
-struct StatisticsQuery {
+struct HistoryQuery {
     period: Option<String>,
 }
 
@@ -134,6 +132,7 @@ pub fn router(context: AppContext, enable_http_tracker: bool) -> Router {
     }
     router = router
         .route("/stats", get(statistics))
+        .route("/history", get(history))
         .route("/metrics", get(metrics))
         .route("/health", get(health));
     if enable_http_tracker {
@@ -279,10 +278,23 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
-async fn statistics(
+async fn statistics(State(context): State<AppContext>) -> Json<StatisticsResponse> {
+    let summary = context.state.summary();
+    let uptime_seconds = context.started_at.elapsed().as_secs();
+    let traffic = context.metrics.traffic_snapshot();
+    Json(StatisticsResponse {
+        version: build_version(),
+        protocol: context.protocol,
+        summary,
+        uptime_seconds,
+        total_requests: traffic.total_requests,
+    })
+}
+
+async fn history(
     State(context): State<AppContext>,
-    Query(query): Query<StatisticsQuery>,
-) -> Result<Json<StatisticsResponse>, ApiError> {
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<DashboardHistory>, ApiError> {
     let (days, bucket_seconds) = match query.period.as_deref().unwrap_or("day") {
         "day" => (1, 5 * 60),
         "week" => (7, 60 * 60),
@@ -290,8 +302,6 @@ async fn statistics(
         _ => return Err(ApiError::bad_request("period must be day, week, or month")),
     };
     let summary = context.state.summary();
-    let uptime_seconds = context.started_at.elapsed().as_secs();
-    let traffic = context.metrics.traffic_snapshot();
     let mut history = context
         .persistence
         .dashboard_history(days, bucket_seconds)
@@ -314,15 +324,7 @@ async fn statistics(
     } else {
         history.metrics.push(current);
     }
-    Ok(Json(StatisticsResponse {
-        version: build_version(),
-        protocol: context.protocol,
-        summary,
-        uptime_seconds,
-        total_requests: traffic.total_requests,
-        requests_per_second: traffic.requests_per_second(),
-        history,
-    }))
+    Ok(Json(history))
 }
 
 fn build_version() -> &'static str {
@@ -724,6 +726,25 @@ const INDEX_HTML: &str = include_str!(concat!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn given_statistics_response_when_serialized_then_history_is_omitted() {
+        let response = StatisticsResponse {
+            version: "test",
+            protocol: Protocol::Http,
+            summary: TrackerSummary::default(),
+            uptime_seconds: 1,
+            total_requests: 2,
+        };
+
+        let serialized =
+            serde_json::to_value(response).expect("statistics response should serialize");
+
+        assert!(serialized.get("history").is_none());
+        assert!(serialized.get("requests_per_second").is_none());
+        assert_eq!(serialized["uptime_seconds"], 1);
+        assert_eq!(serialized["total_requests"], 2);
+    }
 
     #[test]
     fn given_cached_scrape_when_revision_changes_then_cache_is_invalidated() {
