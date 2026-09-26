@@ -9,6 +9,8 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
+use crate::blacklist::Blacklist;
+
 pub type InfoHash = [u8; 20];
 pub type PeerId = [u8; 20];
 
@@ -309,6 +311,57 @@ impl TrackerState {
         }
     }
 
+    pub fn remove_blacklisted(&self, blacklist: &Blacklist) {
+        let mut changed = HashSet::new();
+        self.swarms.retain(|info_hash, swarm| {
+            if blacklist.contains_info_hash(info_hash) {
+                changed.insert(*info_hash);
+                return false;
+            }
+            let before = swarm.peers.len();
+            swarm
+                .peers
+                .retain(|_, peer| !blacklist.contains_ip(&peer.ip));
+            if swarm.peers.len() != before {
+                changed.insert(*info_hash);
+                swarm.complete = swarm.peers.values().filter(|peer| peer.left == 0).count();
+                swarm.incomplete = swarm.peers.len() - swarm.complete;
+            }
+            !swarm.peers.is_empty()
+        });
+        self.completed.retain(|info_hash, _| {
+            let retain = !blacklist.contains_info_hash(info_hash);
+            if !retain {
+                changed.insert(*info_hash);
+            }
+            retain
+        });
+
+        let (peers, seeders, leechers) =
+            self.swarms
+                .iter()
+                .fold((0, 0, 0), |(peers, seeders, leechers), swarm| {
+                    (
+                        peers + swarm.peers.len(),
+                        seeders + swarm.complete,
+                        leechers + swarm.incomplete,
+                    )
+                });
+        self.peer_count.store(peers, Ordering::Relaxed);
+        self.seeder_count.store(seeders, Ordering::Relaxed);
+        self.leecher_count.store(leechers, Ordering::Relaxed);
+        self.swarm_count.store(self.swarms.len(), Ordering::Relaxed);
+        self.torrent_count
+            .store(self.completed.len(), Ordering::Relaxed);
+        self.completed_count.store(
+            self.completed.iter().map(|entry| *entry.value()).sum(),
+            Ordering::Relaxed,
+        );
+        for info_hash in changed {
+            self.mark_changed(info_hash);
+        }
+    }
+
     pub fn swarm_count(&self) -> usize {
         self.swarm_count.load(Ordering::Relaxed)
     }
@@ -584,5 +637,30 @@ mod tests {
         assert_eq!(state.drain_changes().len(), 1);
         state.acknowledge_changes(&latest_changes);
         assert!(state.drain_changes().is_empty());
+    }
+
+    #[test]
+    fn given_blacklisted_hashes_and_ips_when_filtered_then_state_and_counts_are_updated() {
+        let state = TrackerState::default();
+        let blocked_hash = [1; 20];
+        let allowed_hash = [2; 20];
+        state.announce(blocked_hash, peer(1, 0), AnnounceEvent::Completed);
+        state.announce(allowed_hash, peer(2, 0), AnnounceEvent::Started);
+        let mut blocked_peer = peer(3, 10);
+        blocked_peer.ip = "192.0.2.3".parse().unwrap();
+        state.announce(allowed_hash, blocked_peer, AnnounceEvent::Started);
+        let blacklist = Blacklist::from_entries(
+            vec!["0101010101010101010101010101010101010101".into()],
+            vec!["192.0.2.3".parse().unwrap()],
+        )
+        .unwrap();
+
+        state.remove_blacklisted(&blacklist);
+
+        assert_eq!(state.info_hashes(), vec![allowed_hash]);
+        assert_eq!(state.peer_count(), 1);
+        assert_eq!(state.summary().seeders, 1);
+        assert_eq!(state.summary().leechers, 0);
+        assert_eq!(state.summary().completed, 0);
     }
 }

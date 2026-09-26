@@ -10,6 +10,7 @@ use tokio::{net::UdpSocket, sync::watch};
 use tracing::debug;
 
 use crate::{
+    blacklist::Blacklist,
     metrics::AppMetrics,
     rate_limit::RateLimiter,
     state::{unix_timestamp, AnnounceEvent, Peer, TrackerState},
@@ -28,6 +29,7 @@ pub struct UdpTracker {
     rate_limiter: Arc<RateLimiter>,
     announce_interval: u32,
     enable_scrape: bool,
+    blacklist: Blacklist,
     connection_secret: u64,
 }
 
@@ -39,6 +41,7 @@ impl UdpTracker {
         rate_limiter: Arc<RateLimiter>,
         announce_interval: u32,
         enable_scrape: bool,
+        blacklist: Blacklist,
     ) -> std::io::Result<Self> {
         let socket = UdpSocket::bind(address).await?;
         let entropy = SystemTime::now()
@@ -52,6 +55,7 @@ impl UdpTracker {
             rate_limiter,
             announce_interval,
             enable_scrape,
+            blacklist,
             connection_secret: entropy ^ u64::from(std::process::id()),
         })
     }
@@ -87,6 +91,10 @@ impl UdpTracker {
         }
         let action = read_u32(packet, 8)?;
         let transaction_id = read_u32(packet, 12)?;
+        if self.blacklist.contains_ip(&remote.ip()) {
+            self.metrics.request("udp", "packet", "blacklisted");
+            return Some(error_response(transaction_id, "client IP is blacklisted"));
+        }
         debug!(%remote, action, transaction_id, "processing UDP request");
         let response = match action {
             ACTION_CONNECT => self.connect(packet, remote, transaction_id),
@@ -121,6 +129,10 @@ impl UdpTracker {
         let Some(info_hash) = slice_array(packet, 16) else {
             return error_response(transaction_id, "missing info hash");
         };
+        if self.blacklist.contains_info_hash(&info_hash) {
+            self.metrics.request("udp", "announce", "blacklisted");
+            return error_response(transaction_id, "torrent is blacklisted");
+        }
         let Some(peer_id) = slice_array(packet, 36) else {
             return error_response(transaction_id, "missing peer id");
         };
@@ -178,6 +190,13 @@ impl UdpTracker {
         push_u32(&mut response, ACTION_SCRAPE);
         push_u32(&mut response, transaction_id);
         let (info_hashes, _) = packet[16..].as_chunks::<20>();
+        if info_hashes
+            .iter()
+            .any(|info_hash| self.blacklist.contains_info_hash(info_hash))
+        {
+            self.metrics.request("udp", "scrape", "blacklisted");
+            return error_response(transaction_id, "torrent is blacklisted");
+        }
         for info_hash in info_hashes {
             let stats = self.state.stats(info_hash);
             push_u32(&mut response, stats.complete as u32);

@@ -27,6 +27,7 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/release/hive-tracker /usr/local/bin/hive-tracker
 COPY docker/hive.toml /etc/hive/hive.toml
+COPY docker/blacklist.txt /etc/hive/blacklist.txt
 
 USER hive
 WORKDIR /var/lib/hive

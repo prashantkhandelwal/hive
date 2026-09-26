@@ -1,4 +1,5 @@
 pub mod bencode;
+pub mod blacklist;
 pub mod config;
 pub mod metrics;
 pub mod persistence;

@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(TrackerState::default());
     let persistence = Persistence::open(&config.database_path).await?;
     persistence.load(&state).await?;
+    state.remove_blacklisted(&config.blacklist);
     state.remove_stale(config.peer_timeout);
     let metrics = AppMetrics::new()?;
     metrics.set_population(state.peer_count(), state.swarm_count());
@@ -71,6 +72,7 @@ async fn main() -> Result<()> {
                 Arc::clone(&rate_limiter),
                 config.announce_interval,
                 config.enable_udp_scrape,
+                config.blacklist.clone(),
             )
             .await
             .with_context(|| format!("failed to bind UDP listener at {}", config.udp_addr))?,
@@ -95,6 +97,8 @@ async fn main() -> Result<()> {
         udp_addr = %config.udp_addr,
         database = %config.database_path.display(),
         max_concurrent_http_requests = config.max_concurrent_http_requests,
+        blacklisted_info_hashes = config.blacklist.info_hash_count(),
+        blacklisted_ips = config.blacklist.ip_count(),
         "Hive tracker started"
     );
     run_protocols(listener, udp, context, protocol).await?;

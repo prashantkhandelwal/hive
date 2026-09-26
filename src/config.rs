@@ -8,6 +8,8 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::blacklist::Blacklist;
+
 #[derive(Debug, Error, PartialEq)]
 #[error("expected http, udp, or both; got {value}")]
 pub struct ProtocolParseError {
@@ -51,6 +53,7 @@ pub struct AppConfig {
     pub rate_limit_per_minute: u32,
     pub max_concurrent_http_requests: usize,
     pub log_filter: String,
+    pub blacklist: Blacklist,
 }
 
 impl AppConfig {
@@ -63,7 +66,9 @@ impl AppConfig {
         config
             .apply_environment(environment_value)
             .context("failed to apply environment configuration")?;
-        Ok(config.into())
+        let mut config: AppConfig = config.into();
+        config.blacklist = Blacklist::from_file(&path.with_file_name("blacklist.txt"))?;
+        Ok(config)
     }
 
     #[cfg(test)]
@@ -187,6 +192,7 @@ impl From<FileConfig> for AppConfig {
             rate_limit_per_minute: config.rate_limit_per_minute,
             max_concurrent_http_requests: config.max_concurrent_http_requests.get(),
             log_filter: config.log_filter,
+            blacklist: Blacklist::default(),
         }
     }
 }
@@ -226,6 +232,23 @@ mod tests {
         let config = AppConfig::from_toml("").expect("default configuration should parse");
 
         assert_eq!(config.max_concurrent_http_requests, 128);
+    }
+
+    #[test]
+    fn given_configuration_file_when_loaded_then_sibling_blacklist_is_used() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let config_path = directory.path().join("custom.toml");
+        fs::write(&config_path, "").expect("configuration should be written");
+        fs::write(
+            directory.path().join("blacklist.txt"),
+            "0303030303030303030303030303030303030303\n192.0.2.3\n",
+        )
+        .expect("blacklist should be written");
+
+        let config = AppConfig::from_file(config_path).expect("configuration should load");
+
+        assert!(config.blacklist.contains_info_hash(&[3; 20]));
+        assert!(config.blacklist.contains_ip(&"192.0.2.3".parse().unwrap()));
     }
 
     #[test]

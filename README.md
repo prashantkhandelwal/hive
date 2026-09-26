@@ -101,6 +101,25 @@ Requests above the configured limit wait until capacity is available. The
 limit applies to all HTTP routes and does not affect the UDP listener. Values
 must be greater than zero.
 
+Hive reads `blacklist.txt` from the same directory as the selected configuration
+file. Each non-empty line contains one exact IPv4 address, IPv6 address, or
+40-character hexadecimal info hash. Lines and trailing content beginning with
+`#` are comments:
+
+```text
+# Blocked torrent
+0123456789abcdef0123456789abcdef01234567
+
+# Blocked clients
+192.0.2.10
+2001:db8::10
+```
+
+Blacklisted clients and torrents receive tracker error responses for HTTP and
+UDP announce and scrape requests. Hive removes matching peers and torrents from
+restored state during startup. A missing or malformed blacklist file prevents
+startup.
+
 Set `log_filter` to a tracing directive such as `hive_tracker=trace` for maximum
 detail or `hive_tracker=info` for quieter operational logs. Multiple directives
 can be comma-separated. Keep production deployments at `info` or quieter:
@@ -123,6 +142,7 @@ Build the release binary and install the binary, configuration, and unit:
 cargo build --release
 sudo install -Dm755 target/release/hive-tracker /usr/local/bin/hive-tracker
 sudo install -Dm644 hive.toml /etc/hive/hive.toml
+sudo install -Dm644 blacklist.txt /etc/hive/blacklist.txt
 sudo install -Dm644 hive-tracker.service /etc/systemd/system/hive-tracker.service
 ```
 
@@ -228,8 +248,8 @@ docker inspect --format "{{.State.Health.Status}}" hive
 ```
 
 The default container configuration enables both tracker protocols and both
-scrape endpoints. To customize other settings, mount a configuration file at
-`/etc/hive/hive.toml`:
+scrape endpoints. To customize other settings or the blacklist, mount both
+files under `/etc/hive`:
 
 ```powershell
 docker run --detach --name hive `
@@ -237,6 +257,7 @@ docker run --detach --name hive `
   --publish 6969:6969/udp `
   --volume hive-data:/data `
   --volume "${PWD}/hive.toml:/etc/hive/hive.toml:ro" `
+  --volume "${PWD}/blacklist.txt:/etc/hive/blacklist.txt:ro" `
   prashantkhandelwal/hive:latest
 ```
 
