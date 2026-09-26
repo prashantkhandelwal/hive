@@ -1,8 +1,13 @@
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{ensure, Context, Result};
 use clap::Parser;
 use hive_tracker::{
+    blacklist::Blacklist,
     config::{AppConfig, Protocol},
     metrics::AppMetrics,
     persistence::Persistence,
@@ -19,6 +24,8 @@ use tokio::{
 };
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
+
+const BLACKLIST_RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -42,6 +49,7 @@ async fn main() -> Result<()> {
     if cli.health_check {
         return health_check().await;
     }
+    let blacklist_path = cli.config.with_file_name("blacklist.txt");
     let config = AppConfig::from_file(&cli.config)?;
     let log_filter = EnvFilter::try_new(&config.log_filter)
         .with_context(|| format!("invalid log_filter: {}", config.log_filter))?;
@@ -101,6 +109,12 @@ async fn main() -> Result<()> {
         metrics.clone(),
         started_at,
     ));
+    let blacklist_task = tokio::spawn(reload_blacklist(
+        blacklist_path,
+        config.blacklist.clone(),
+        Arc::clone(&state),
+        metrics.clone(),
+    ));
     let traffic_log_task = tokio::spawn(log_traffic(metrics.clone()));
     info!(
         ?protocol,
@@ -115,6 +129,7 @@ async fn main() -> Result<()> {
     run_protocols(listener, udp, context, protocol).await?;
 
     persistence_task.abort();
+    blacklist_task.abort();
     traffic_log_task.abort();
     persistence.save(&state).await?;
     persistence
@@ -183,6 +198,55 @@ async fn log_traffic(metrics: AppMetrics) {
             udp_egress_bytes_per_minute = traffic.udp.egress_bytes,
             "traffic summary"
         );
+    }
+}
+
+async fn reload_blacklist(
+    path: PathBuf,
+    blacklist: Blacklist,
+    state: Arc<TrackerState>,
+    metrics: AppMetrics,
+) {
+    let mut ticker = time::interval(BLACKLIST_RELOAD_INTERVAL);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        let reload_path = path.clone();
+        let reload_blacklist = blacklist.clone();
+        let reload_state = Arc::clone(&state);
+        let result = tokio::task::spawn_blocking(move || {
+            if !reload_blacklist.reload_from_file(&reload_path)? {
+                return Ok(None);
+            }
+            reload_state.remove_blacklisted(&reload_blacklist);
+            Ok::<_, anyhow::Error>(Some((
+                reload_blacklist.info_hash_count(),
+                reload_blacklist.ip_count(),
+            )))
+        })
+        .await;
+        match result {
+            Ok(Ok(Some((info_hashes, ips)))) => {
+                metrics.set_population(state.peer_count(), state.swarm_count());
+                info!(
+                    path = %path.display(),
+                    blacklisted_info_hashes = info_hashes,
+                    blacklisted_ips = ips,
+                    "blacklist reloaded"
+                );
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => {
+                error!(
+                    %error,
+                    path = %path.display(),
+                    "failed to reload blacklist; retaining last valid entries"
+                );
+            }
+            Err(error) => {
+                error!(%error, "blacklist reload task failed");
+            }
+        }
     }
 }
 

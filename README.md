@@ -117,8 +117,11 @@ file. Each non-empty line contains one exact IPv4 address, IPv6 address, or
 
 Blacklisted clients and torrents receive tracker error responses for HTTP and
 UDP announce and scrape requests. Hive removes matching peers and torrents from
-restored state during startup. A missing or malformed blacklist file prevents
-startup.
+restored state during startup. While Hive is running, it checks the file every
+five seconds and atomically applies valid changes to both HTTP and UDP. Newly
+blacklisted peers and torrents are removed from active state. If a reload is
+missing or malformed, Hive logs the error and retains the last valid entries;
+a missing or malformed file still prevents startup.
 
 Set `log_filter` to a tracing directive such as `hive_tracker=trace` for maximum
 detail or `hive_tracker=info` for quieter operational logs. Multiple directives
