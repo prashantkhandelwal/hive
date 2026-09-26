@@ -240,8 +240,9 @@ Build a local image directly from the repository with:
 docker build --build-arg HIVE_VERSION=local --tag hive:local .
 ```
 
-The container health check calls `http://127.0.0.1:3000/health`. Inspect it
-with:
+The container health check uses Hive's built-in `--health-check` command to call
+`http://127.0.0.1:3000/health`, so the runtime image does not need curl or TLS
+libraries. Inspect it with:
 
 ```powershell
 docker inspect --format "{{.State.Health.Status}}" hive

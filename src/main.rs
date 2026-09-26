@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use clap::Parser;
 use hive_tracker::{
     config::{AppConfig, Protocol},
@@ -11,7 +11,12 @@ use hive_tracker::{
     udp::UdpTracker,
     web::{router, AppContext, ScrapeCache},
 };
-use tokio::{net::TcpListener, sync::watch, time};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::watch,
+    time,
+};
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -21,6 +26,9 @@ use tracing_subscriber::EnvFilter;
     about = "Minimal HTTP and UDP BitTorrent tracker"
 )]
 struct Cli {
+    #[arg(long, help = "Check the local HTTP health endpoint and exit")]
+    health_check: bool,
+
     #[arg(long, value_enum, help = "Protocol listener to run")]
     protocol: Option<Protocol>,
 
@@ -31,6 +39,9 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.health_check {
+        return health_check().await;
+    }
     let config = AppConfig::from_file(&cli.config)?;
     let log_filter = EnvFilter::try_new(&config.log_filter)
         .with_context(|| format!("invalid log_filter: {}", config.log_filter))?;
@@ -115,6 +126,40 @@ async fn main() -> Result<()> {
         .await?;
     info!("Hive tracker stopped");
     Ok(())
+}
+
+async fn health_check() -> Result<()> {
+    let result = time::timeout(std::time::Duration::from_secs(3), async {
+        let mut stream = TcpStream::connect("127.0.0.1:3000")
+            .await
+            .context("failed to connect to Hive health endpoint")?;
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .context("failed to send Hive health request")?;
+        let mut response = Vec::with_capacity(128);
+        stream
+            .take(128)
+            .read_to_end(&mut response)
+            .await
+            .context("failed to read Hive health response")?;
+        ensure!(
+            health_response_is_ok(&response),
+            "Hive health endpoint returned an unhealthy response"
+        );
+        Ok(())
+    })
+    .await
+    .context("Hive health check timed out")?;
+    result
+}
+
+fn health_response_is_ok(response: &[u8]) -> bool {
+    response
+        .split(|byte| *byte == b'\n')
+        .next()
+        .map(|status| status.ends_with(b" 200 OK\r") || status.ends_with(b" 200 OK"))
+        .unwrap_or(false)
 }
 
 async fn log_traffic(metrics: AppMetrics) {
@@ -295,5 +340,16 @@ mod tests {
         let protocol = resolve_protocol(None, Protocol::Both);
 
         assert_eq!(protocol, Protocol::Both);
+    }
+
+    #[test]
+    fn given_http_health_response_when_checked_then_only_success_status_is_accepted() {
+        assert!(health_response_is_ok(
+            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"
+        ));
+        assert!(!health_response_is_ok(
+            b"HTTP/1.1 503 Service Unavailable\r\n\r\n"
+        ));
+        assert!(!health_response_is_ok(b"not HTTP"));
     }
 }
