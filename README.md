@@ -1,8 +1,8 @@
 ## Overview
 
 Hive is a compact BitTorrent tracker written in Rust. A shared DashMap-backed
-swarm registry serves HTTP and BEP 15 UDP clients, while SQLite snapshots retain
-peer and completion data across restarts.
+swarm registry serves HTTP and BEP 15 UDP clients. Operators can retain peer,
+completion, and dashboard data in SQLite or run entirely in memory.
 
 The service exposes:
 
@@ -37,26 +37,26 @@ Without `--protocol`, Hive uses `default_protocol` from `hive.toml`. Its default
 value is `both`, so the HTTP and UDP listeners run when neither option is
 configured.
 
-Open `http://localhost:3000` for the dashboard. The default SQLite database is
-created as `hive.db` in the working directory. The dashboard remains available
-when `udp` is selected; in that mode, the read-only HTTP scrape route remains
-available while HTTP announces are disabled.
+Open `http://localhost:3000` for the dashboard. In the default `sqlite` mode,
+the database is created as `hive.db` in the working directory. The dashboard
+remains available when `udp` is selected; in that mode, the read-only HTTP
+scrape route remains available while HTTP announces are disabled.
 
 The single-page dashboard shows peers, seeders, leechers, torrents, completed
 downloads, and uptime. Its shared trend chart supports day, week, and month
-views. Metric snapshots and daily ingress and egress totals are stored in
-SQLite, so transfer totals can be summed across the selected period. Request
-rates and lifetime counters since the current process started remain available
-through Prometheus.
+views. Metric snapshots and ingress and egress totals are retained by the
+selected persistence backend. Memory mode keeps them until restart, while
+SQLite mode keeps them across restarts. Request rates and lifetime counters
+since the current process started remain available through Prometheus.
 The trend chart uses Apache ECharts 6.1.0 loaded from jsDelivr with a pinned
 version and subresource integrity hash, so chart rendering requires access to
 the CDN.
 
 Tracker population totals are maintained incrementally for constant-time
-telemetry updates. Dashboard history is cached in memory until a new snapshot
-is committed, tracker persistence writes only changed torrents, and full HTTP
-scrape responses are cached for up to five seconds with mutation-based
-invalidation.
+telemetry updates. In SQLite mode, dashboard history is cached until a new
+snapshot is committed and tracker persistence writes only changed torrents.
+Full HTTP scrape responses are cached for up to five seconds with
+mutation-based invalidation.
 
 The announce path is designed to stay bounded and in memory:
 
@@ -70,10 +70,9 @@ The announce path is designed to stay bounded and in memory:
 * stale-peer scans run on Tokio's blocking pool so large cleanup passes do not
   occupy asynchronous request workers.
 
-Hive deliberately retains SQLite persistence and IPv6 support rather than
-copying narrower in-memory-only tracker designs. Persistence is incremental and
-outside the announce path, while IPv4 and IPv6 compact peer lists are emitted
-separately.
+Hive supports both a narrow memory-only deployment and durable SQLite
+persistence. Storage work remains outside the announce path, while IPv4 and
+IPv6 compact peer lists are emitted separately.
 
 ## Configuration
 
@@ -84,7 +83,8 @@ Hive reads configuration from `hive.toml` in the working directory.
 | `default_protocol` | `both` | Listener mode: `http`, `udp`, or `both` |
 | `http_addr` | `0.0.0.0:3000` | Web UI and HTTP tracker listen address |
 | `udp_addr` | `0.0.0.0:6969` | UDP tracker listen address |
-| `database_path` | `hive.db` | SQLite database path |
+| `persistence` | `sqlite` | Storage mode: `sqlite` or `memory` |
+| `database_path` | `hive.db` | SQLite database path; unused in memory mode |
 | `announce_interval` | `1800` | Client reannounce interval in seconds |
 | `peer_timeout` | `3600` | Maximum idle peer age in seconds |
 | `persistence_interval` | `30` | Snapshot interval in seconds |
@@ -94,6 +94,11 @@ Hive reads configuration from `hive.toml` in the working directory.
 
 Use `--config path/to/config.toml` to load another file. The `--protocol`
 command-line argument overrides `default_protocol` for the current process.
+
+Set `persistence = "memory"` for a memory-only tracker. Peer and completion
+state is discarded on restart, while dashboard history remains available for
+the lifetime of the process. The default `sqlite` mode retains tracker state
+and dashboard history across restarts.
 
 The HTTP concurrency limit provides overload protection while retaining
 headroom above the observed throughput optimum near 64 in-flight requests.
@@ -167,6 +172,7 @@ docker run --detach `
   --env "HIVE_ENABLE_UDP_SCRAPE=true" `
   --env "HIVE_HTTP_ADDR=0.0.0.0:3000" `
   --env "HIVE_UDP_ADDR=0.0.0.0:6969" `
+  --env "HIVE_PERSISTENCE=sqlite" `
   --env "HIVE_DATABASE_PATH=/data/hive.db" `
   --env "HIVE_ANNOUNCE_INTERVAL=1800" `
   --env "HIVE_PEER_TIMEOUT=3600" `
@@ -186,7 +192,8 @@ Environment variables override values from `/etc/hive/hive.toml`:
 | `HIVE_ENABLE_UDP_SCRAPE` | `true` | Enable the UDP scrape action |
 | `HIVE_HTTP_ADDR` | `0.0.0.0:3000` | HTTP listen address inside the container |
 | `HIVE_UDP_ADDR` | `0.0.0.0:6969` | UDP listen address inside the container |
-| `HIVE_DATABASE_PATH` | `/data/hive.db` | SQLite database path |
+| `HIVE_PERSISTENCE` | `sqlite` | Storage mode: `sqlite` or `memory` |
+| `HIVE_DATABASE_PATH` | `/data/hive.db` | SQLite database path; unused in memory mode |
 | `HIVE_ANNOUNCE_INTERVAL` | `1800` | Client reannounce interval in seconds |
 | `HIVE_PEER_TIMEOUT` | `3600` | Maximum idle peer age in seconds |
 | `HIVE_PERSISTENCE_INTERVAL` | `30` | Persistence interval in seconds |

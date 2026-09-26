@@ -350,7 +350,11 @@ async fn health(State(context): State<AppContext>) -> (StatusCode, Json<HealthRe
             StatusCode::OK,
             Json(HealthResponse {
                 status: "ok",
-                database: "ok",
+                database: if context.persistence.is_memory() {
+                    "disabled"
+                } else {
+                    "ok"
+                },
             }),
         )
     } else {

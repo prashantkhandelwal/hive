@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     net::IpAddr,
     path::Path,
     str::FromStr,
@@ -31,9 +31,22 @@ pub enum PersistenceError {
 
 #[derive(Clone)]
 pub struct Persistence {
-    pool: SqlitePool,
+    backend: PersistenceBackend,
     traffic_checkpoint: Arc<Mutex<TrafficCheckpoint>>,
     history_cache: Arc<Mutex<HashMap<(u64, u64), DashboardHistory>>>,
+}
+
+#[derive(Clone)]
+enum PersistenceBackend {
+    Sqlite(SqlitePool),
+    Memory(Arc<Mutex<MemoryDashboardHistory>>),
+}
+
+#[derive(Default)]
+struct MemoryDashboardHistory {
+    metrics: Vec<MetricPoint>,
+    total_ingress_bytes: u64,
+    total_egress_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -68,6 +81,16 @@ struct TrafficCheckpoint {
 }
 
 impl Persistence {
+    pub fn memory() -> Self {
+        Self {
+            backend: PersistenceBackend::Memory(Arc::new(Mutex::new(
+                MemoryDashboardHistory::default(),
+            ))),
+            traffic_checkpoint: Arc::new(Mutex::new(TrafficCheckpoint::default())),
+            history_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
     pub async fn open(path: &Path) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(path)
@@ -114,7 +137,7 @@ impl Persistence {
         .execute(&pool)
         .await?;
         Ok(Self {
-            pool,
+            backend: PersistenceBackend::Sqlite(pool),
             traffic_checkpoint: Arc::new(Mutex::new(TrafficCheckpoint::default())),
             history_cache: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -126,6 +149,32 @@ impl Persistence {
         uptime_seconds: u64,
         traffic: TrafficSnapshot,
     ) -> Result<()> {
+        let PersistenceBackend::Sqlite(pool) = &self.backend else {
+            let PersistenceBackend::Memory(history) = &self.backend else {
+                unreachable!();
+            };
+            let mut history = history.lock().await;
+            let point = MetricPoint {
+                timestamp: unix_timestamp() / 60 * 60,
+                peers: summary.peers,
+                seeders: summary.seeders,
+                leechers: summary.leechers,
+                torrents: summary.torrents,
+                completed: summary.completed,
+            };
+            if let Some(latest) = history
+                .metrics
+                .last_mut()
+                .filter(|latest| latest.timestamp == point.timestamp)
+            {
+                *latest = point;
+            } else {
+                history.metrics.push(point);
+            }
+            history.total_ingress_bytes = traffic.total_ingress_bytes;
+            history.total_egress_bytes = traffic.total_egress_bytes;
+            return Ok(());
+        };
         let mut checkpoint = self.traffic_checkpoint.lock().await;
         let ingress_delta = traffic
             .total_ingress_bytes
@@ -134,7 +183,7 @@ impl Persistence {
             .total_egress_bytes
             .saturating_sub(checkpoint.egress_bytes);
         let recorded_at = unix_timestamp() / 60 * 60;
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = pool.begin().await?;
         sqlx::query(
             "INSERT INTO metric_snapshots (
                 recorded_at, peers, seeders, leechers, torrents, completed, uptime_seconds
@@ -179,6 +228,36 @@ impl Persistence {
         days: u64,
         bucket_seconds: u64,
     ) -> Result<DashboardHistory> {
+        if let PersistenceBackend::Memory(history) = &self.backend {
+            let history = history.lock().await;
+            let cutoff = unix_timestamp().saturating_sub(days * 24 * 60 * 60);
+            let mut buckets = BTreeMap::new();
+            for point in history
+                .metrics
+                .iter()
+                .filter(|point| point.timestamp >= cutoff)
+            {
+                buckets.insert(point.timestamp / bucket_seconds, point.clone());
+            }
+            let traffic = if history.total_ingress_bytes == 0 && history.total_egress_bytes == 0 {
+                Vec::new()
+            } else {
+                vec![TrafficPoint {
+                    day: "current session".to_owned(),
+                    ingress_bytes: history.total_ingress_bytes,
+                    egress_bytes: history.total_egress_bytes,
+                }]
+            };
+            return Ok(DashboardHistory {
+                metrics: buckets.into_values().collect(),
+                traffic,
+                total_ingress_bytes: history.total_ingress_bytes,
+                total_egress_bytes: history.total_egress_bytes,
+            });
+        }
+        let PersistenceBackend::Sqlite(pool) = &self.backend else {
+            unreachable!();
+        };
         let cache_key = (days, bucket_seconds);
         let mut cache = self.history_cache.lock().await;
         if let Some(history) = cache.get(&cache_key) {
@@ -199,7 +278,7 @@ impl Persistence {
         )
         .bind(sqlite_integer(cutoff))
         .bind(sqlite_integer(bucket_seconds))
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await?
         .into_iter()
         .map(|row| {
@@ -220,7 +299,7 @@ impl Persistence {
              ORDER BY day",
         )
         .bind(format!("-{} days", days.saturating_sub(1)))
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await?
         .into_iter()
         .map(|row| {
@@ -249,8 +328,11 @@ impl Persistence {
     }
 
     pub async fn load(&self, state: &TrackerState) -> Result<()> {
+        let PersistenceBackend::Sqlite(pool) = &self.backend else {
+            return Ok(());
+        };
         for row in sqlx::query("SELECT info_hash, downloaded FROM swarms")
-            .fetch_all(&self.pool)
+            .fetch_all(pool)
             .await?
         {
             let info_hash = identifier(row.try_get("info_hash")?, "info_hash")?;
@@ -260,7 +342,7 @@ impl Persistence {
 
         for row in
             sqlx::query("SELECT info_hash, peer_id, ip, port, bytes_left, last_seen FROM peers")
-                .fetch_all(&self.pool)
+                .fetch_all(pool)
                 .await?
         {
             let info_hash = identifier(row.try_get("info_hash")?, "info_hash")?;
@@ -285,8 +367,12 @@ impl Persistence {
         if changes.is_empty() {
             return Ok(());
         }
+        let PersistenceBackend::Sqlite(pool) = &self.backend else {
+            state.acknowledge_changes(&changes);
+            return Ok(());
+        };
         let result: Result<()> = async {
-            let mut transaction = self.pool.begin().await?;
+            let mut transaction = pool.begin().await?;
             for change in &changes {
                 sqlx::query("DELETE FROM peers WHERE info_hash = ?")
                     .bind(change.info_hash.as_slice())
@@ -334,10 +420,17 @@ impl Persistence {
     }
 
     pub async fn is_healthy(&self) -> bool {
-        sqlx::query_scalar::<_, i64>("SELECT 1")
-            .fetch_one(&self.pool)
-            .await
-            .is_ok()
+        match &self.backend {
+            PersistenceBackend::Sqlite(pool) => sqlx::query_scalar::<_, i64>("SELECT 1")
+                .fetch_one(pool)
+                .await
+                .is_ok(),
+            PersistenceBackend::Memory(_) => true,
+        }
+    }
+
+    pub fn is_memory(&self) -> bool {
+        matches!(self.backend, PersistenceBackend::Memory(_))
     }
 }
 
@@ -427,7 +520,9 @@ mod tests {
         assert_eq!(history.metrics[0].completed, 7);
         assert_eq!(history.total_ingress_bytes, 150);
         assert_eq!(history.total_egress_bytes, 260);
-        database.pool.close().await;
+        if let PersistenceBackend::Sqlite(pool) = &database.backend {
+            pool.close().await;
+        }
         drop(database);
         std::fs::remove_file(database_path).expect("temporary database should be removed");
     }
@@ -480,8 +575,63 @@ mod tests {
         assert_eq!(restored.torrent_count(), 1);
         assert_eq!(restored.peers(&second_hash, &[0; 20], 10).len(), 1);
 
-        database.pool.close().await;
+        if let PersistenceBackend::Sqlite(pool) = &database.backend {
+            pool.close().await;
+        }
         drop(database);
         std::fs::remove_file(database_path).expect("temporary database should be removed");
+    }
+
+    #[tokio::test]
+    async fn given_memory_mode_when_snapshots_are_recorded_then_history_lasts_for_process_lifetime()
+    {
+        let persistence = Persistence::memory();
+        let state = TrackerState::default();
+        state.announce(
+            [4; 20],
+            Peer {
+                peer_id: [5; 20],
+                ip: "127.0.0.1".parse().unwrap(),
+                port: 6881,
+                left: 10,
+                last_seen: unix_timestamp(),
+            },
+            crate::state::AnnounceEvent::Started,
+        );
+        persistence
+            .save(&state)
+            .await
+            .expect("memory save should succeed");
+        persistence
+            .record_dashboard_snapshot(
+                state.summary(),
+                10,
+                TrafficSnapshot {
+                    total_ingress_bytes: 100,
+                    total_egress_bytes: 200,
+                    ..TrafficSnapshot::default()
+                },
+            )
+            .await
+            .expect("memory snapshot should succeed");
+
+        let history = persistence
+            .dashboard_history(1, 60)
+            .await
+            .expect("memory history should load");
+        let restored = TrackerState::default();
+        persistence
+            .load(&restored)
+            .await
+            .expect("memory load should succeed");
+
+        assert_eq!(history.metrics.len(), 1);
+        assert_eq!(history.metrics[0].peers, 1);
+        assert_eq!(history.total_ingress_bytes, 100);
+        assert_eq!(history.total_egress_bytes, 200);
+        assert!(state.drain_changes().is_empty());
+        assert_eq!(restored.peer_count(), 0);
+        assert!(persistence.is_healthy().await);
+        assert!(persistence.is_memory());
     }
 }

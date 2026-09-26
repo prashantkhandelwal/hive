@@ -14,6 +14,12 @@ pub struct ProtocolParseError {
     value: String,
 }
 
+#[derive(Debug, Error, PartialEq)]
+#[error("expected sqlite or memory; got {value}")]
+pub struct PersistenceModeParseError {
+    value: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
@@ -37,6 +43,27 @@ impl std::str::FromStr for Protocol {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PersistenceMode {
+    Sqlite,
+    Memory,
+}
+
+impl FromStr for PersistenceMode {
+    type Err = PersistenceModeParseError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "sqlite" => Ok(Self::Sqlite),
+            "memory" => Ok(Self::Memory),
+            _ => Err(PersistenceModeParseError {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub default_protocol: Protocol,
@@ -44,6 +71,7 @@ pub struct AppConfig {
     pub enable_udp_scrape: bool,
     pub http_addr: SocketAddr,
     pub udp_addr: SocketAddr,
+    pub persistence: PersistenceMode,
     pub database_path: PathBuf,
     pub announce_interval: u32,
     pub peer_timeout: Duration,
@@ -81,6 +109,7 @@ struct FileConfig {
     enable_udp_scrape: bool,
     http_addr: SocketAddr,
     udp_addr: SocketAddr,
+    persistence: PersistenceMode,
     database_path: PathBuf,
     announce_interval: u32,
     peer_timeout: u64,
@@ -102,6 +131,7 @@ impl Default for FileConfig {
             udp_addr: "0.0.0.0:6969"
                 .parse()
                 .expect("default UDP address is valid"),
+            persistence: PersistenceMode::Sqlite,
             database_path: PathBuf::from("hive.db"),
             announce_interval: 1800,
             peer_timeout: 3600,
@@ -132,6 +162,7 @@ impl FileConfig {
         override_parsed!("HIVE_ENABLE_UDP_SCRAPE", enable_udp_scrape);
         override_parsed!("HIVE_HTTP_ADDR", http_addr);
         override_parsed!("HIVE_UDP_ADDR", udp_addr);
+        override_parsed!("HIVE_PERSISTENCE", persistence);
         override_parsed!("HIVE_ANNOUNCE_INTERVAL", announce_interval);
         override_parsed!("HIVE_PEER_TIMEOUT", peer_timeout);
         override_parsed!("HIVE_PERSISTENCE_INTERVAL", persistence_interval);
@@ -180,6 +211,7 @@ impl From<FileConfig> for AppConfig {
             enable_udp_scrape: config.enable_udp_scrape,
             http_addr: config.http_addr,
             udp_addr: config.udp_addr,
+            persistence: config.persistence,
             database_path: config.database_path,
             announce_interval: config.announce_interval,
             peer_timeout: Duration::from_secs(config.peer_timeout),
@@ -207,6 +239,7 @@ mod tests {
         let config = AppConfig::from_toml(
             r#"
                 default_protocol = "udp"
+                persistence = "memory"
                 http_addr = "127.0.0.1:8080"
                 peer_timeout = 90
                 max_concurrent_http_requests = 64
@@ -215,6 +248,7 @@ mod tests {
         .expect("configuration should parse");
 
         assert_eq!(config.default_protocol, Protocol::Udp);
+        assert_eq!(config.persistence, PersistenceMode::Memory);
         assert_eq!(config.http_addr, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.peer_timeout, Duration::from_secs(90));
         assert_eq!(config.udp_addr, "0.0.0.0:6969".parse().unwrap());
@@ -226,6 +260,7 @@ mod tests {
         let config = AppConfig::from_toml("").expect("default configuration should parse");
 
         assert_eq!(config.max_concurrent_http_requests, 128);
+        assert_eq!(config.persistence, PersistenceMode::Sqlite);
     }
 
     #[test]
@@ -244,6 +279,7 @@ mod tests {
             ("HIVE_ENABLE_UDP_SCRAPE", "false"),
             ("HIVE_HTTP_ADDR", "127.0.0.1:8080"),
             ("HIVE_UDP_ADDR", "127.0.0.1:6968"),
+            ("HIVE_PERSISTENCE", "memory"),
             ("HIVE_DATABASE_PATH", "/data/custom.db"),
             ("HIVE_ANNOUNCE_INTERVAL", "900"),
             ("HIVE_PEER_TIMEOUT", "1800"),
@@ -263,6 +299,7 @@ mod tests {
         assert!(!config.enable_udp_scrape);
         assert_eq!(config.http_addr, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.udp_addr, "127.0.0.1:6968".parse().unwrap());
+        assert_eq!(config.persistence, PersistenceMode::Memory);
         assert_eq!(config.database_path, PathBuf::from("/data/custom.db"));
         assert_eq!(config.announce_interval, 900);
         assert_eq!(config.peer_timeout, Duration::from_secs(1800));

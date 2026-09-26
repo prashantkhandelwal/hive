@@ -1,6 +1,7 @@
 default_protocol = "http"
 http_addr = "0.0.0.0:3000"
 udp_addr = "0.0.0.0:6969"
+persistence = "sqlite"
 database_path = "hive.db"
 announce_interval = 1800
 peer_timeout = 3600
