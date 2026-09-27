@@ -71,10 +71,9 @@ impl AppConfig {
         config
             .apply_environment(environment_value)
             .context("failed to apply environment configuration")?;
-        let mut config: AppConfig = config.into();
+        let mut config: AppConfig = config.try_into()?;
         config.blacklist = Blacklist::from_file(&path.with_file_name("blacklist.txt"))?;
         Ok(config)
-
     }
 
     #[cfg(test)]
