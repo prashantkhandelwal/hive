@@ -10,7 +10,7 @@ use std::{
 use axum::{
     body::{Body, Bytes, HttpBody},
     extract::{ConnectInfo, Query, RawQuery, Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
@@ -227,9 +227,16 @@ async fn observe_traffic(
 async fn announce(
     State(context): State<AppContext>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
-    tracker_gate(&context, remote.ip())?;
+    let client_ip = resolve_client_ip(
+        remote.ip(),
+        &headers,
+        &context.config.trusted_proxy_cidrs,
+        &context.config.client_ip_header,
+    )?;
+    tracker_gate(&context, client_ip)?;
     let params = parse_query(query.as_deref().unwrap_or_default())?;
     let info_hash = required_identifier(&params, "info_hash")?;
     let peer_id = required_identifier(&params, "peer_id")?;
@@ -244,7 +251,7 @@ async fn announce(
     let compact = parse_compact(first(&params, "compact"))?;
     let peer = Peer {
         peer_id,
-        ip: remote.ip(),
+        ip: client_ip,
         port,
         left,
         last_seen: unix_timestamp(),
@@ -258,7 +265,7 @@ async fn announce(
     Ok(bencoded_response(announce_payload(
         stats,
         peers,
-        remote.ip(),
+        client_ip,
         context.config.announce_interval,
         compact,
     )))
@@ -267,9 +274,16 @@ async fn announce(
 async fn scrape(
     State(context): State<AppContext>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
-    tracker_gate(&context, remote.ip())?;
+    let client_ip = resolve_client_ip(
+        remote.ip(),
+        &headers,
+        &context.config.trusted_proxy_cidrs,
+        &context.config.client_ip_header,
+    )?;
+    tracker_gate(&context, client_ip)?;
     let params = parse_query(query.as_deref().unwrap_or_default())?;
     let format = scrape_format(first(&params, "format"))?;
     let body = match params.get("info_hash") {
@@ -405,6 +419,32 @@ fn tracker_gate(context: &AppContext, ip: IpAddr) -> Result<(), ApiError> {
         });
     }
     Ok(())
+}
+
+fn resolve_client_ip(
+    remote_ip: IpAddr,
+    headers: &HeaderMap,
+    trusted_proxy_cidrs: &[ipnet::IpNet],
+    client_ip_header: &HeaderName,
+) -> Result<IpAddr, ApiError> {
+    if !trusted_proxy_cidrs
+        .iter()
+        .any(|network| network.contains(&remote_ip))
+    {
+        return Ok(remote_ip);
+    }
+
+    let value = headers.get(client_ip_header).ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "trusted proxy request is missing {client_ip_header}"
+        ))
+    })?;
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::bad_request(format!("{client_ip_header} is not valid ASCII")))?;
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request(format!("{client_ip_header} is not a valid IP address")))
 }
 
 fn update_population(context: &AppContext) {
@@ -842,6 +882,69 @@ mod tests {
                 .message,
             "missing downloaded"
         );
+    }
+
+    #[test]
+    fn given_untrusted_peer_when_client_header_is_present_then_socket_ip_is_used() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "203.0.113.10".parse().unwrap());
+
+        let client_ip = resolve_client_ip(
+            "198.51.100.20".parse().unwrap(),
+            &headers,
+            &["127.0.0.1/32".parse().unwrap()],
+            &HeaderName::from_static("cf-connecting-ip"),
+        )
+        .expect("untrusted peer should use its socket address");
+
+        assert_eq!(client_ip, "198.51.100.20".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn given_trusted_proxy_when_client_header_is_valid_then_forwarded_ip_is_used() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "203.0.113.10".parse().unwrap());
+
+        let client_ip = resolve_client_ip(
+            "127.0.0.1".parse().unwrap(),
+            &headers,
+            &["127.0.0.1/32".parse().unwrap()],
+            &HeaderName::from_static("cf-connecting-ip"),
+        )
+        .expect("trusted proxy should use the forwarded address");
+
+        assert_eq!(client_ip, "203.0.113.10".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn given_trusted_proxy_without_client_header_then_request_is_rejected() {
+        let error = resolve_client_ip(
+            "127.0.0.1".parse().unwrap(),
+            &HeaderMap::new(),
+            &["127.0.0.1/32".parse().unwrap()],
+            &HeaderName::from_static("cf-connecting-ip"),
+        )
+        .expect_err("trusted proxy must supply the configured header");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("missing cf-connecting-ip"));
+    }
+
+    #[test]
+    fn given_trusted_proxy_with_invalid_client_header_then_request_is_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "not-an-ip".parse().unwrap());
+
+        let error = resolve_client_ip(
+            "127.0.0.1".parse().unwrap(),
+            &headers,
+            &["127.0.0.1/32".parse().unwrap()],
+            &HeaderName::from_static("cf-connecting-ip"),
+        )
+        .expect_err("invalid forwarded address should fail");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("not a valid IP address"));
     }
 
     #[test]

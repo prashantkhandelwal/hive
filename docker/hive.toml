@@ -7,6 +7,8 @@ peer_timeout = 3600
 persistence_interval = 30
 rate_limit_per_minute = 500
 max_concurrent_http_requests = 128
+trusted_proxy_cidrs = []
+client_ip_header = "cf-connecting-ip"
 log_filter = "hive_tracker=info"
 enable_http_scrape = true
 enable_udp_scrape = true

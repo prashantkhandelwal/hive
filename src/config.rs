@@ -4,7 +4,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use axum::http::HeaderName;
 use clap::ValueEnum;
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -51,6 +53,8 @@ pub struct AppConfig {
     pub persistence_interval: Duration,
     pub rate_limit_per_minute: u32,
     pub max_concurrent_http_requests: usize,
+    pub trusted_proxy_cidrs: Vec<IpNet>,
+    pub client_ip_header: HeaderName,
     pub log_filter: String,
 }
 
@@ -64,13 +68,13 @@ impl AppConfig {
         config
             .apply_environment(environment_value)
             .context("failed to apply environment configuration")?;
-        Ok(config.into())
+        config.try_into()
     }
 
     #[cfg(test)]
     fn from_toml(contents: &str) -> Result<Self> {
         let config: FileConfig = toml::from_str(contents)?;
-        Ok(config.into())
+        config.try_into()
     }
 }
 
@@ -89,6 +93,8 @@ struct FileConfig {
     persistence_interval: u64,
     rate_limit_per_minute: u32,
     max_concurrent_http_requests: NonZeroUsize,
+    trusted_proxy_cidrs: Vec<IpNet>,
+    client_ip_header: String,
     log_filter: String,
 }
 
@@ -112,6 +118,8 @@ impl Default for FileConfig {
             rate_limit_per_minute: 120,
             max_concurrent_http_requests: NonZeroUsize::new(128)
                 .expect("default HTTP concurrency limit is nonzero"),
+            trusted_proxy_cidrs: Vec::new(),
+            client_ip_header: "cf-connecting-ip".to_owned(),
             log_filter: "hive_tracker=info".to_owned(),
         }
     }
@@ -144,6 +152,12 @@ impl FileConfig {
             max_concurrent_http_requests
         );
 
+        if let Some(raw) = value("HIVE_TRUSTED_PROXY_CIDRS")? {
+            self.trusted_proxy_cidrs = parse_comma_separated("HIVE_TRUSTED_PROXY_CIDRS", &raw)?;
+        }
+        if let Some(raw) = value("HIVE_CLIENT_IP_HEADER")? {
+            self.client_ip_header = raw;
+        }
         if let Some(raw) = value("HIVE_ADMIN_ADDR")? {
             self.admin_addr = if raw.is_empty() {
                 None
@@ -182,9 +196,26 @@ where
         .map_err(|error| anyhow!("invalid {name} value {value:?}: {error}"))
 }
 
-impl From<FileConfig> for AppConfig {
-    fn from(config: FileConfig) -> Self {
-        Self {
+fn parse_comma_separated<T>(name: &str, value: &str) -> Result<Vec<T>>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| parse_environment_value(name, item))
+        .collect()
+}
+
+impl TryFrom<FileConfig> for AppConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(config: FileConfig) -> Result<Self> {
+        let client_ip_header = HeaderName::from_str(&config.client_ip_header)
+            .with_context(|| format!("invalid client_ip_header {:?}", config.client_ip_header))?;
+        Ok(Self {
             default_protocol: config.default_protocol,
             enable_http_scrape: config.enable_http_scrape,
             enable_udp_scrape: config.enable_udp_scrape,
@@ -197,8 +228,10 @@ impl From<FileConfig> for AppConfig {
             persistence_interval: Duration::from_secs(config.persistence_interval),
             rate_limit_per_minute: config.rate_limit_per_minute,
             max_concurrent_http_requests: config.max_concurrent_http_requests.get(),
+            trusted_proxy_cidrs: config.trusted_proxy_cidrs,
+            client_ip_header,
             log_filter: config.log_filter,
-        }
+        })
     }
 }
 
@@ -222,6 +255,8 @@ mod tests {
                 admin_addr = "127.0.0.1:8081"
                 peer_timeout = 90
                 max_concurrent_http_requests = 64
+                trusted_proxy_cidrs = ["127.0.0.1/32", "172.20.0.0/16"]
+                client_ip_header = "cf-connecting-ip"
             "#,
         )
         .expect("configuration should parse");
@@ -232,6 +267,14 @@ mod tests {
         assert_eq!(config.peer_timeout, Duration::from_secs(90));
         assert_eq!(config.udp_addr, "0.0.0.0:6969".parse().unwrap());
         assert_eq!(config.max_concurrent_http_requests, 64);
+        assert_eq!(
+            config.trusted_proxy_cidrs,
+            vec![
+                "127.0.0.1/32".parse().unwrap(),
+                "172.20.0.0/16".parse().unwrap()
+            ]
+        );
+        assert_eq!(config.client_ip_header, "cf-connecting-ip");
     }
 
     #[test]
@@ -265,13 +308,15 @@ mod tests {
             ("HIVE_PERSISTENCE_INTERVAL", "60"),
             ("HIVE_RATE_LIMIT_PER_MINUTE", "500"),
             ("HIVE_MAX_CONCURRENT_HTTP_REQUESTS", "256"),
+            ("HIVE_TRUSTED_PROXY_CIDRS", "127.0.0.1/32, 172.20.0.0/16"),
+            ("HIVE_CLIENT_IP_HEADER", "CF-Connecting-IP"),
             ("HIVE_LOG_FILTER", "hive_tracker=warn"),
         ]);
 
         config
             .apply_environment(|name| Ok(values.get(name).map(ToString::to_string)))
             .expect("environment values should apply");
-        let config = AppConfig::from(config);
+        let config = AppConfig::try_from(config).expect("configuration should be valid");
 
         assert_eq!(config.default_protocol, Protocol::Http);
         assert!(!config.enable_http_scrape);
@@ -285,6 +330,8 @@ mod tests {
         assert_eq!(config.persistence_interval, Duration::from_secs(60));
         assert_eq!(config.rate_limit_per_minute, 500);
         assert_eq!(config.max_concurrent_http_requests, 256);
+        assert_eq!(config.trusted_proxy_cidrs.len(), 2);
+        assert_eq!(config.client_ip_header, "cf-connecting-ip");
         assert_eq!(config.log_filter, "hive_tracker=warn");
     }
 
@@ -312,5 +359,28 @@ mod tests {
         assert!(error
             .to_string()
             .contains("HIVE_MAX_CONCURRENT_HTTP_REQUESTS"));
+    }
+
+    #[test]
+    fn given_invalid_client_ip_header_when_loaded_then_configuration_is_rejected() {
+        let result = AppConfig::from_toml(r#"client_ip_header = "not a header""#);
+
+        assert!(result
+            .expect_err("invalid header should fail")
+            .to_string()
+            .contains("client_ip_header"));
+    }
+
+    #[test]
+    fn given_invalid_proxy_cidr_in_environment_when_applied_then_variable_is_named() {
+        let mut config = FileConfig::default();
+
+        let error = config
+            .apply_environment(|name| {
+                Ok((name == "HIVE_TRUSTED_PROXY_CIDRS").then(|| "not-a-cidr".to_owned()))
+            })
+            .expect_err("invalid CIDR should fail");
+
+        assert!(error.to_string().contains("HIVE_TRUSTED_PROXY_CIDRS"));
     }
 }
