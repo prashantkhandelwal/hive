@@ -91,6 +91,7 @@ struct StatisticsResponse {
     summary: TrackerSummary,
     uptime_seconds: u64,
     total_requests: u64,
+    request_per_second: u64,
 }
 
 #[derive(Default, Deserialize)]
@@ -288,6 +289,7 @@ async fn statistics(State(context): State<AppContext>) -> Json<StatisticsRespons
         summary,
         uptime_seconds,
         total_requests: traffic.total_requests,
+        request_per_second: traffic.tracker_requests_last_second,
     })
 }
 
@@ -735,6 +737,7 @@ mod tests {
             summary: TrackerSummary::default(),
             uptime_seconds: 1,
             total_requests: 2,
+            request_per_second: 12,
         };
 
         let serialized =
@@ -744,6 +747,7 @@ mod tests {
         assert!(serialized.get("requests_per_second").is_none());
         assert_eq!(serialized["uptime_seconds"], 1);
         assert_eq!(serialized["total_requests"], 2);
+        assert_eq!(serialized["request_per_second"], 12);
     }
 
     #[test]
