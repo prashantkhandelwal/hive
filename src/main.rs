@@ -14,7 +14,7 @@ use hive_tracker::{
     rate_limit::RateLimiter,
     state::TrackerState,
     udp::UdpTracker,
-    web::{router, AppContext, ScrapeCache},
+    web::{admin_router, router, tracker_router, AppContext, ScrapeCache},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -82,6 +82,15 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(config.http_addr)
         .await
         .with_context(|| format!("failed to bind web listener at {}", config.http_addr))?;
+    let admin_listener = if let Some(admin_addr) = config.admin_addr {
+        Some(
+            TcpListener::bind(admin_addr)
+                .await
+                .with_context(|| format!("failed to bind admin listener at {admin_addr}"))?,
+        )
+    } else {
+        None
+    };
     let udp = if matches!(protocol, Protocol::Udp | Protocol::Both) {
         Some(
             UdpTracker::bind(
@@ -119,6 +128,7 @@ async fn main() -> Result<()> {
     info!(
         ?protocol,
         web_addr = %config.http_addr,
+        admin_addr = ?config.admin_addr,
         udp_addr = %config.udp_addr,
         database = %config.database_path.display(),
         max_concurrent_http_requests = config.max_concurrent_http_requests,
@@ -126,7 +136,7 @@ async fn main() -> Result<()> {
         blacklisted_ips = config.blacklist.ip_count(),
         "Hive tracker started"
     );
-    run_protocols(listener, udp, context, protocol).await?;
+    run_protocols(listener, admin_listener, udp, context, protocol).await?;
 
     persistence_task.abort();
     blacklist_task.abort();
@@ -256,22 +266,49 @@ fn resolve_protocol(command_line: Option<Protocol>, configured: Protocol) -> Pro
 
 async fn run_protocols(
     listener: TcpListener,
+    admin_listener: Option<TcpListener>,
     udp: Option<UdpTracker>,
     context: AppContext,
     protocol: Protocol,
 ) -> Result<()> {
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let http_shutdown = shutdown_receiver.clone();
+    let admin_shutdown = shutdown_receiver.clone();
     let udp_shutdown = shutdown_receiver;
+    let private_admin_enabled = admin_listener.is_some();
+    let public_context = context.clone();
     let http_server = async {
+        let app = if private_admin_enabled {
+            tracker_router(
+                public_context,
+                matches!(protocol, Protocol::Http | Protocol::Both),
+            )
+        } else {
+            router(
+                public_context,
+                matches!(protocol, Protocol::Http | Protocol::Both),
+            )
+        };
         axum::serve(
             listener,
-            router(context, matches!(protocol, Protocol::Http | Protocol::Both))
-                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .with_graceful_shutdown(wait_for_shutdown(http_shutdown))
         .await
         .context("web server failed")
+    };
+    let admin_server = async {
+        let Some(admin_listener) = admin_listener else {
+            wait_for_shutdown(admin_shutdown).await;
+            return Ok(());
+        };
+        axum::serve(
+            admin_listener,
+            admin_router(context).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(wait_for_shutdown(admin_shutdown))
+        .await
+        .context("admin server failed")
     };
     let udp_server = async {
         let Some(udp) = udp else {
@@ -281,26 +318,37 @@ async fn run_protocols(
         udp.run(udp_shutdown).await.context("UDP server failed")
     };
 
-    tokio::pin!(http_server, udp_server);
+    tokio::pin!(http_server, admin_server, udp_server);
 
     tokio::select! {
         result = &mut http_server => {
             shutdown_sender.send_replace(true);
-            let udp_result = udp_server.await;
+            let (admin_result, udp_result) = tokio::join!(admin_server, udp_server);
             result?;
+            admin_result?;
+            udp_result
+        },
+        result = &mut admin_server => {
+            shutdown_sender.send_replace(true);
+            let (http_result, udp_result) = tokio::join!(http_server, udp_server);
+            result?;
+            http_result?;
             udp_result
         },
         result = &mut udp_server => {
             shutdown_sender.send_replace(true);
-            let http_result = http_server.await;
+            let (http_result, admin_result) = tokio::join!(http_server, admin_server);
             result?;
-            http_result
+            http_result?;
+            admin_result
         },
         _ = shutdown_signal() => {
             info!("shutdown requested; draining active requests");
             shutdown_sender.send_replace(true);
-            let (http_result, udp_result) = tokio::join!(http_server, udp_server);
+            let (http_result, admin_result, udp_result) =
+                tokio::join!(http_server, admin_server, udp_server);
             http_result?;
+            admin_result?;
             udp_result
         },
     }
