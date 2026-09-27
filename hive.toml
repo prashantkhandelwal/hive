@@ -1,5 +1,8 @@
 default_protocol = "http"
 http_addr = "0.0.0.0:3000"
+# Set this to a private address to move the dashboard, /stats, /history, and
+# /metrics off the public HTTP listener.
+admin_addr = "127.0.0.1:6869"
 udp_addr = "0.0.0.0:6969"
 database_path = "hive.db"
 announce_interval = 1800
@@ -7,6 +10,8 @@ peer_timeout = 3600
 persistence_interval = 30
 rate_limit_per_minute = 500
 max_concurrent_http_requests = 128
+trusted_proxy_cidrs = []
+client_ip_header = "cf-connecting-ip"
 log_filter = "hive_tracker=info"
 
 # Set to false to disable only the HTTP /scrape endpoint.

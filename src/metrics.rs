@@ -24,6 +24,7 @@ pub struct TrafficSnapshot {
     pub web_http: ProtocolTraffic,
     pub http: ProtocolTraffic,
     pub udp: ProtocolTraffic,
+    pub tracker_requests_last_second: u64,
     pub total_requests: u64,
     pub total_ingress_bytes: u64,
     pub total_egress_bytes: u64,
@@ -88,6 +89,8 @@ pub struct AppMetrics {
     announce_events: IntCounterVec,
     traffic_counters: TrafficCounters,
     requests_per_minute: IntGaugeVec,
+    requests_per_second: IntGauge,
+    tracker_requests_last_second: IntGauge,
     active_peers: IntGauge,
     active_swarms: IntGauge,
     traffic_window: Arc<Mutex<TrafficWindow>>,
@@ -128,6 +131,14 @@ impl AppMetrics {
             ),
             &["protocol"],
         )?;
+        let requests_per_second = IntGauge::new(
+            "hive_requests_per_second",
+            "Rounded average requests per second during the rolling 60-second window",
+        )?;
+        let tracker_requests_last_second = IntGauge::new(
+            "hive_tracker_requests_last_second",
+            "HTTP tracker requests and UDP packets handled during the last completed second",
+        )?;
         let active_peers = IntGauge::new("hive_active_peers", "Peers currently in memory")?;
         let active_swarms = IntGauge::new("hive_active_swarms", "Swarms currently in memory")?;
 
@@ -136,6 +147,8 @@ impl AppMetrics {
         registry.register(Box::new(traffic_bytes.clone()))?;
         registry.register(Box::new(traffic_requests.clone()))?;
         registry.register(Box::new(requests_per_minute.clone()))?;
+        registry.register(Box::new(requests_per_second.clone()))?;
+        registry.register(Box::new(tracker_requests_last_second.clone()))?;
         registry.register(Box::new(active_peers.clone()))?;
         registry.register(Box::new(active_swarms.clone()))?;
         let traffic_counters = TrafficCounters {
@@ -156,6 +169,8 @@ impl AppMetrics {
             announce_events,
             traffic_counters,
             requests_per_minute,
+            requests_per_second,
+            tracker_requests_last_second,
             active_peers,
             active_swarms,
             traffic_window: Arc::new(Mutex::new(TrafficWindow::default())),
@@ -256,6 +271,7 @@ impl AppMetrics {
         };
         if let Ok(mut window) = self.traffic_window.lock() {
             prune_window(&mut window, second);
+            let last_completed_second = second.saturating_sub(1);
             for bucket in &window.buckets {
                 let traffic = match bucket.protocol {
                     "torrent_http" => &mut snapshot.torrent_http,
@@ -265,6 +281,9 @@ impl AppMetrics {
                 traffic.ingress_bytes += bucket.ingress_bytes;
                 traffic.egress_bytes += bucket.egress_bytes;
                 traffic.requests_per_minute += bucket.requests;
+                if bucket.second == last_completed_second && bucket.protocol != "web_http" {
+                    snapshot.tracker_requests_last_second += bucket.requests;
+                }
             }
         }
         snapshot.http = ProtocolTraffic {
@@ -282,6 +301,10 @@ impl AppMetrics {
         self.requests_per_minute
             .with_label_values(&["udp"])
             .set(snapshot.udp.requests_per_minute as i64);
+        self.requests_per_second
+            .set(snapshot.requests_per_second().round() as i64);
+        self.tracker_requests_last_second
+            .set(snapshot.tracker_requests_last_second as i64);
         snapshot
     }
 }
@@ -346,7 +369,7 @@ mod tests {
     #[test]
     fn given_requests_in_rolling_window_when_rate_requested_then_total_rate_is_returned() {
         let metrics = AppMetrics::new().expect("metrics should initialize");
-        for _ in 0..60 {
+        for _ in 0..50 {
             metrics.record_traffic_at("torrent_http", 1, 1, 1_000);
             metrics.record_traffic_at("web_http", 1, 1, 1_000);
             metrics.record_traffic_at("udp", 1, 1, 1_000);
@@ -354,8 +377,43 @@ mod tests {
 
         assert_eq!(
             metrics.traffic_snapshot_at(1_000).requests_per_second(),
-            3.0
+            2.5
         );
+        assert_eq!(metrics.requests_per_second.get(), 3);
+    }
+
+    #[test]
+    fn given_recent_traffic_when_snapshotted_then_only_last_completed_tracker_second_is_returned() {
+        let metrics = AppMetrics::new().expect("metrics should initialize");
+        for _ in 0..2 {
+            metrics.record_traffic_at("torrent_http", 1, 1, 999);
+        }
+        for _ in 0..3 {
+            metrics.record_traffic_at("udp", 1, 1, 999);
+        }
+        for _ in 0..4 {
+            metrics.record_traffic_at("web_http", 1, 1, 999);
+        }
+        metrics.record_traffic_at("torrent_http", 1, 1, 1_000);
+        metrics.record_traffic_at("udp", 1, 1, 998);
+
+        let snapshot = metrics.traffic_snapshot_at(1_000);
+
+        assert_eq!(snapshot.tracker_requests_last_second, 5);
+        assert_eq!(metrics.tracker_requests_last_second.get(), 5);
+        assert_eq!(snapshot.requests_per_second(), 11.0 / 60.0);
+    }
+
+    #[test]
+    fn given_no_tracker_traffic_in_last_second_when_snapshotted_then_realtime_rate_is_zero() {
+        let metrics = AppMetrics::new().expect("metrics should initialize");
+        metrics.record_traffic_at("torrent_http", 1, 1, 998);
+        metrics.record_traffic_at("web_http", 1, 1, 999);
+
+        let snapshot = metrics.traffic_snapshot_at(1_000);
+
+        assert_eq!(snapshot.tracker_requests_last_second, 0);
+        assert_eq!(metrics.tracker_requests_last_second.get(), 0);
     }
 
     #[test]

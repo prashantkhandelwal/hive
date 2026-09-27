@@ -9,7 +9,8 @@ The service exposes:
 * `GET /announce` for compact HTTP announces
 * `GET /scrape` for all torrents or one or more repeated `info_hash` parameters
 * `GET /health` for database-aware health checks
-* `GET /stats?period=day|week|month` for current and historical JSON statistics
+* `GET /stats` for current JSON statistics
+* `GET /history?period=day|week|month` for historical JSON statistics
 * `GET /metrics` for Prometheus text exposition
 * `GET /` for the operational dashboard
 * UDP connect, announce, and scrape actions on port `6969` by default
@@ -43,11 +44,15 @@ when `udp` is selected; in that mode, the read-only HTTP scrape route remains
 available while HTTP announces are disabled.
 
 The single-page dashboard shows peers, seeders, leechers, torrents, completed
-downloads, and uptime. Its shared trend chart supports day, week, and month
-views. Metric snapshots and daily ingress and egress totals are stored in
-SQLite, so transfer totals can be summed across the selected period. Request
-rates and lifetime counters since the current process started remain available
-through Prometheus.
+downloads, uptime, and tracker requests from the last completed second. Current
+statistics refresh every five seconds, independently of historical data. Its
+shared trend chart supports day, week, and month views. Metric
+snapshots and daily ingress and egress totals are stored in SQLite, so transfer
+totals can be summed across the selected period. The
+`hive_tracker_requests_last_second` Prometheus gauge reports the same tracker
+sample, while `hive_requests_per_second` remains the rounded average across the
+rolling 60-second traffic window. Lifetime counters since the current process
+started also remain available through Prometheus.
 The trend chart uses Apache ECharts 6.1.0 loaded from jsDelivr with a pinned
 version and subresource integrity hash, so chart rendering requires access to
 the CDN.
@@ -83,6 +88,7 @@ Hive reads configuration from `hive.toml` in the working directory.
 | --- | --- | --- |
 | `default_protocol` | `both` | Listener mode: `http`, `udp`, or `both` |
 | `http_addr` | `0.0.0.0:3000` | Web UI and HTTP tracker listen address |
+| `admin_addr` | Not set | Optional private dashboard, statistics, history, and metrics listen address |
 | `udp_addr` | `0.0.0.0:6969` | UDP tracker listen address |
 | `database_path` | `hive.db` | SQLite database path |
 | `announce_interval` | `1800` | Client reannounce interval in seconds |
@@ -90,6 +96,8 @@ Hive reads configuration from `hive.toml` in the working directory.
 | `persistence_interval` | `30` | Snapshot interval in seconds |
 | `rate_limit_per_minute` | `120` | Per-source-IP request allowance |
 | `max_concurrent_http_requests` | `128` | Maximum HTTP requests processed concurrently |
+| `trusted_proxy_cidrs` | `[]` | Proxy networks allowed to provide the client IP header |
+| `client_ip_header` | `cf-connecting-ip` | Client IP header accepted from trusted proxies |
 | `log_filter` | `hive_tracker=info` | Tracing filter and verbosity |
 
 Use `--config path/to/config.toml` to load another file. The `--protocol`
@@ -101,15 +109,125 @@ Requests above the configured limit wait until capacity is available. The
 limit applies to all HTTP routes and does not affect the UDP listener. Values
 must be greater than zero.
 
+### Cloudflare Tunnel and trusted reverse proxies
+
+Hive uses the direct connection address for HTTP rate limiting and peer
+registration by default. Behind Cloudflare Tunnel, that address belongs to
+`cloudflared`, so every visitor would otherwise share one rate-limit bucket.
+Cloudflare supplies the original visitor address in `CF-Connecting-IP`.
+
+Hive accepts that header only when the direct connection comes from a network
+listed in `trusted_proxy_cidrs`. Requests from all other addresses ignore the
+header, preventing public clients from bypassing rate limits with a forged
+value. Never configure `0.0.0.0/0` or `::/0` as a trusted proxy network.
+
+#### Native Linux deployment
+
+When Hive and `cloudflared` run on the same host, bind Hive to loopback and
+trust only loopback. Update `/etc/hive/hive.toml`, or the configuration file
+passed to Hive:
+
+```toml
+http_addr = "127.0.0.1:3000"
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+client_ip_header = "cf-connecting-ip"
+rate_limit_per_minute = 500
+```
+
+Point the tunnel at the loopback listener:
+
+```yaml
+ingress:
+  - hostname: tracker.example.com
+    service: http://127.0.0.1:3000
+  - service: http_status:404
+```
+
+Restart both services after changing their configuration:
+
+```bash
+sudo systemctl restart hive-tracker
+sudo systemctl restart cloudflared
+```
+
+Confirm that Hive is not listening on a public interface:
+
+```bash
+sudo ss -ltnp | grep ':3000'
+```
+
+The output should contain `127.0.0.1:3000`, not `0.0.0.0:3000`.
+
+#### Docker deployment
+
+When Hive and `cloudflared` run as containers, attach them to the same private
+Docker network, configure the tunnel origin as `http://hive:3000`, and do not
+publish Hive's TCP port 3000 to the host. Find the private network's subnet:
+
+```bash
+docker network inspect <network-name> \
+  --format '{{(index .IPAM.Config 0).Subnet}}'
+```
+
+Set that subnet and the Cloudflare header in the Compose `.env` file:
+
+```dotenv
+HIVE_TRUSTED_PROXY_CIDRS=172.20.0.0/16
+HIVE_CLIENT_IP_HEADER=cf-connecting-ip
+HIVE_RATE_LIMIT_PER_MINUTE=500
+```
+
+Replace `172.20.0.0/16` with the subnet reported for the private tunnel
+network, then recreate the Hive container:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+If `cloudflared` runs on the host while Hive runs in Docker, bind the published
+port to host loopback:
+
+```yaml
+ports:
+  - "127.0.0.1:3000:3000"
+```
+
+Then trust the source address or narrow CIDR that Docker presents to the Hive
+container. Do not assume it is `127.0.0.1`; inspect the Docker network and use
+the narrowest stable range.
+
+#### Verification and disabling proxy trust
+
+Through the public hostname, `/announce` and `/scrape` now use each visitor's
+`CF-Connecting-IP` value for rate limiting and peer registration. A malformed
+header, or a missing header on a connection from a trusted proxy, returns HTTP
+400. Headers received from an untrusted source are ignored.
+
+If Cloudflare Tunnel is removed, restore the required public bind address and
+disable proxy trust:
+
+```toml
+http_addr = "0.0.0.0:3000"
+trusted_proxy_cidrs = []
+```
+
+The `client_ip_header` value can remain configured because it is ignored when
+`trusted_proxy_cidrs` is empty. Cloudflare Tunnel carries HTTP traffic only;
+the UDP tracker on port 6969 requires separate direct UDP exposure.
+
 Set `log_filter` to a tracing directive such as `hive_tracker=trace` for maximum
 detail or `hive_tracker=info` for quieter operational logs. Multiple directives
 can be comma-separated. Keep production deployments at `info` or quieter:
 per-request debug logging is intentionally opt-in because synchronous formatting
 and log output reduce announce throughput.
 
-The dashboard, tracker endpoints, aggregate statistics, and health endpoint are
-public. Per-source-IP rate limiting protects HTTP and UDP tracker traffic, and
-the UDP tracker uses short-lived source-bound connection IDs.
+By default, the dashboard, tracker endpoints, aggregate statistics, and health
+endpoint share `http_addr` and are public. Set `admin_addr` to a private address,
+such as `127.0.0.1:3001`, to move `/`, `/stats`, `/history`, and `/metrics` to a
+separate listener. The public listener then exposes only `/announce`, `/scrape`
+when enabled, and `/health`. Do not bind or publish the admin listener on an
+untrusted network. Per-source-IP rate limiting protects HTTP and UDP tracker
+traffic, and the UDP tracker uses short-lived source-bound connection IDs.
 
 ## Linux systemd service
 
@@ -185,6 +303,7 @@ Environment variables override values from `/etc/hive/hive.toml`:
 | `HIVE_ENABLE_HTTP_SCRAPE` | `true` | Enable the HTTP scrape endpoint |
 | `HIVE_ENABLE_UDP_SCRAPE` | `true` | Enable the UDP scrape action |
 | `HIVE_HTTP_ADDR` | `0.0.0.0:3000` | HTTP listen address inside the container |
+| `HIVE_ADMIN_ADDR` | `0.0.0.0:3001` | Optional private admin listen address; empty keeps the combined listener |
 | `HIVE_UDP_ADDR` | `0.0.0.0:6969` | UDP listen address inside the container |
 | `HIVE_DATABASE_PATH` | `/data/hive.db` | SQLite database path |
 | `HIVE_ANNOUNCE_INTERVAL` | `1800` | Client reannounce interval in seconds |
@@ -213,6 +332,11 @@ Alternatively, use the included Compose configuration:
 ```powershell
 docker compose up --detach
 ```
+
+To enable the private admin listener with Compose, set
+`HIVE_ADMIN_ADDR=0.0.0.0:3001` and expose it only on a trusted interface or to a
+private reverse proxy. For local-only host access, add
+`127.0.0.1:3001:3001` to the service's `ports` list.
 
 Build a local image directly from the repository with:
 
