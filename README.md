@@ -9,7 +9,8 @@ The service exposes:
 * `GET /announce` for compact HTTP announces
 * `GET /scrape` for all torrents or one or more repeated `info_hash` parameters
 * `GET /health` for database-aware health checks
-* `GET /stats?period=day|week|month` for current and historical JSON statistics
+* `GET /stats` for current JSON statistics
+* `GET /history?period=day|week|month` for historical JSON statistics
 * `GET /metrics` for Prometheus text exposition
 * `GET /` for the operational dashboard
 * UDP connect, announce, and scrape actions on port `6969` by default

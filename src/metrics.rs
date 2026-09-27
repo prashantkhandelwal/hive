@@ -88,6 +88,7 @@ pub struct AppMetrics {
     announce_events: IntCounterVec,
     traffic_counters: TrafficCounters,
     requests_per_minute: IntGaugeVec,
+    requests_per_second: IntGauge,
     active_peers: IntGauge,
     active_swarms: IntGauge,
     traffic_window: Arc<Mutex<TrafficWindow>>,
@@ -128,6 +129,10 @@ impl AppMetrics {
             ),
             &["protocol"],
         )?;
+        let requests_per_second = IntGauge::new(
+            "hive_requests_per_second",
+            "Rounded average requests per second during the rolling 60-second window",
+        )?;
         let active_peers = IntGauge::new("hive_active_peers", "Peers currently in memory")?;
         let active_swarms = IntGauge::new("hive_active_swarms", "Swarms currently in memory")?;
 
@@ -136,6 +141,7 @@ impl AppMetrics {
         registry.register(Box::new(traffic_bytes.clone()))?;
         registry.register(Box::new(traffic_requests.clone()))?;
         registry.register(Box::new(requests_per_minute.clone()))?;
+        registry.register(Box::new(requests_per_second.clone()))?;
         registry.register(Box::new(active_peers.clone()))?;
         registry.register(Box::new(active_swarms.clone()))?;
         let traffic_counters = TrafficCounters {
@@ -156,6 +162,7 @@ impl AppMetrics {
             announce_events,
             traffic_counters,
             requests_per_minute,
+            requests_per_second,
             active_peers,
             active_swarms,
             traffic_window: Arc::new(Mutex::new(TrafficWindow::default())),
@@ -282,6 +289,8 @@ impl AppMetrics {
         self.requests_per_minute
             .with_label_values(&["udp"])
             .set(snapshot.udp.requests_per_minute as i64);
+        self.requests_per_second
+            .set(snapshot.requests_per_second().round() as i64);
         snapshot
     }
 }
@@ -346,7 +355,7 @@ mod tests {
     #[test]
     fn given_requests_in_rolling_window_when_rate_requested_then_total_rate_is_returned() {
         let metrics = AppMetrics::new().expect("metrics should initialize");
-        for _ in 0..60 {
+        for _ in 0..50 {
             metrics.record_traffic_at("torrent_http", 1, 1, 1_000);
             metrics.record_traffic_at("web_http", 1, 1, 1_000);
             metrics.record_traffic_at("udp", 1, 1, 1_000);
@@ -354,8 +363,9 @@ mod tests {
 
         assert_eq!(
             metrics.traffic_snapshot_at(1_000).requests_per_second(),
-            3.0
+            2.5
         );
+        assert_eq!(metrics.requests_per_second.get(), 3);
     }
 
     #[test]

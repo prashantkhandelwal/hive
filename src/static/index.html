@@ -307,21 +307,28 @@
             }, true);
         }
 
-        async function loadStats() {
+        async function loadDashboard() {
             try {
-                const response = await fetch(`/stats?period=${activePeriod}`, { cache: 'no-store' });
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                const data = await response.json();
+                const [statsResponse, historyResponse] = await Promise.all([
+                    fetch('/stats', { cache: 'no-store' }),
+                    fetch(`/history?period=${activePeriod}`, { cache: 'no-store' })
+                ]);
+                if (!statsResponse.ok) throw new Error(`/stats returned HTTP ${statsResponse.status}`);
+                if (!historyResponse.ok) throw new Error(`/history returned HTTP ${historyResponse.status}`);
+                const [data, historyData] = await Promise.all([
+                    statsResponse.json(),
+                    historyResponse.json()
+                ]);
                 for (const key of ['peers', 'seeders', 'leechers', 'torrents', 'completed']) {
                     byId(key).textContent = data[key].toLocaleString();
                 }
                 byId('uptime').textContent = formatDuration(data.uptime_seconds);
-                byId('ingress').textContent = formatBytes(data.history.total_ingress_bytes);
-                byId('egress').textContent = formatBytes(data.history.total_egress_bytes);
+                byId('ingress').textContent = formatBytes(historyData.total_ingress_bytes);
+                byId('egress').textContent = formatBytes(historyData.total_egress_bytes);
                 byId('transferPeriod').textContent = periods[activePeriod];
                 byId('protocol').textContent = `Active protocol: ${data.protocol.toUpperCase()}`;
                 byId('version').textContent = 'v' + data.version;
-                history = data.history.metrics;
+                history = historyData.metrics;
                 drawChart();
                 byId('status').textContent = 'Online';
                 byId('connection').classList.remove('offline');
@@ -340,12 +347,12 @@
                 activePeriod = button.dataset.period;
                 document.querySelectorAll('[data-period]').forEach(item =>
                     item.setAttribute('aria-pressed', String(item === button)));
-                loadStats();
+                loadDashboard();
             });
         });
         window.addEventListener('resize', () => trendChart?.resize());
-        loadStats();
-        setInterval(loadStats, 30000);
+        loadDashboard();
+        setInterval(loadDashboard, 30000);
     </script>
 </body>
 </html>
