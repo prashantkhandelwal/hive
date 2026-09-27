@@ -44,11 +44,15 @@ when `udp` is selected; in that mode, the read-only HTTP scrape route remains
 available while HTTP announces are disabled.
 
 The single-page dashboard shows peers, seeders, leechers, torrents, completed
-downloads, and uptime. Its shared trend chart supports day, week, and month
-views. Metric snapshots and daily ingress and egress totals are stored in
-SQLite, so transfer totals can be summed across the selected period. Request
-rates and lifetime counters since the current process started remain available
-through Prometheus.
+downloads, uptime, and tracker requests from the last completed second. Current
+statistics refresh every five seconds, independently of historical data. Its
+shared trend chart supports day, week, and month views. Metric
+snapshots and daily ingress and egress totals are stored in SQLite, so transfer
+totals can be summed across the selected period. The
+`hive_tracker_requests_last_second` Prometheus gauge reports the same tracker
+sample, while `hive_requests_per_second` remains the rounded average across the
+rolling 60-second traffic window. Lifetime counters since the current process
+started also remain available through Prometheus.
 The trend chart uses Apache ECharts 6.1.0 loaded from jsDelivr with a pinned
 version and subresource integrity hash, so chart rendering requires access to
 the CDN.
