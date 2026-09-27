@@ -18,10 +18,7 @@ RUN --mount=type=cache,id=hive-cargo-registry-${TARGETARCH}${TARGETVARIANT},targ
 
 FROM debian:bookworm-slim AS runtime
 
-RUN apt-get update \
-    && apt-get install --no-install-recommends --yes ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system hive \
+RUN groupadd --system hive \
     && useradd --system --gid hive --home-dir /var/lib/hive --create-home hive \
     && install --directory --owner hive --group hive /data /etc/hive
 
@@ -36,7 +33,7 @@ EXPOSE 3000/tcp
 EXPOSE 6969/udp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD ["curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3000/health"]
+    CMD ["hive-tracker", "--health-check"]
 
 STOPSIGNAL SIGTERM
 

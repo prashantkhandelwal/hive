@@ -1,15 +1,16 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap},
-    fmt::Write as _,
+    io::Write as _,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use axum::{
-    body::{Body, HttpBody},
+    body::{Body, Bytes, HttpBody},
     extract::{ConnectInfo, Query, RawQuery, Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
@@ -52,11 +53,11 @@ pub struct ScrapeCache {
 struct CachedScrape {
     revision: u64,
     expires_at: Instant,
-    body: Vec<u8>,
+    body: Bytes,
 }
 
 impl ScrapeCache {
-    fn get(&self, revision: u64) -> Option<Vec<u8>> {
+    fn get(&self, revision: u64) -> Option<Bytes> {
         self.entry.lock().ok().and_then(|entry| {
             entry
                 .as_ref()
@@ -65,7 +66,7 @@ impl ScrapeCache {
         })
     }
 
-    fn insert(&self, revision: u64, body: Vec<u8>) {
+    fn insert(&self, revision: u64, body: Bytes) {
         if let Ok(mut entry) = self.entry.lock() {
             *entry = Some(CachedScrape {
                 revision,
@@ -90,12 +91,11 @@ struct StatisticsResponse {
     summary: TrackerSummary,
     uptime_seconds: u64,
     total_requests: u64,
-    requests_per_second: f64,
-    history: DashboardHistory,
+    request_per_second: u64,
 }
 
 #[derive(Default, Deserialize)]
-struct StatisticsQuery {
+struct HistoryQuery {
     period: Option<String>,
 }
 
@@ -124,20 +124,48 @@ struct ApiError {
 }
 
 pub fn router(context: AppContext, enable_http_tracker: bool) -> Router {
-    let app_metrics = context.metrics.clone();
-    let config = &context.config;
-    let max_concurrent_http_requests = config.max_concurrent_http_requests;
-    let mut router = Router::new().route("/", get(index));
-    if config.enable_http_scrape {
-        router = router.route("/scrape", get(scrape));
-    }
-    router = router
+    let mut router = Router::new()
+        .route("/", get(index))
         .route("/stats", get(statistics))
+        .route("/history", get(history))
         .route("/metrics", get(metrics))
         .route("/health", get(health));
+    router = add_tracker_routes(router, &context, enable_http_tracker);
+    finish_router(router, context)
+}
+
+pub fn tracker_router(context: AppContext, enable_http_tracker: bool) -> Router {
+    let router = Router::new().route("/health", get(health));
+    let router = add_tracker_routes(router, &context, enable_http_tracker);
+    finish_router(router, context)
+}
+
+pub fn admin_router(context: AppContext) -> Router {
+    let router = Router::new()
+        .route("/", get(index))
+        .route("/stats", get(statistics))
+        .route("/history", get(history))
+        .route("/metrics", get(metrics));
+    finish_router(router, context)
+}
+
+fn add_tracker_routes(
+    mut router: Router<AppContext>,
+    context: &AppContext,
+    enable_http_tracker: bool,
+) -> Router<AppContext> {
+    if context.config.enable_http_scrape {
+        router = router.route("/scrape", get(scrape));
+    }
     if enable_http_tracker {
         router = router.route("/announce", get(announce));
     }
+    router
+}
+
+fn finish_router(router: Router<AppContext>, context: AppContext) -> Router {
+    let app_metrics = context.metrics.clone();
+    let max_concurrent_http_requests = context.config.max_concurrent_http_requests;
     let router = router.with_state(context);
     router
         .layer(middleware::from_fn_with_state(app_metrics, observe_traffic))
@@ -199,9 +227,16 @@ async fn observe_traffic(
 async fn announce(
     State(context): State<AppContext>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
-    tracker_gate(&context, remote.ip())?;
+    let client_ip = resolve_client_ip(
+        remote.ip(),
+        &headers,
+        &context.config.trusted_proxy_cidrs,
+        &context.config.client_ip_header,
+    )?;
+    tracker_gate(&context, client_ip)?;
     let params = parse_query(query.as_deref().unwrap_or_default())?;
     let info_hash = required_identifier(&params, "info_hash")?;
     let peer_id = required_identifier(&params, "peer_id")?;
@@ -216,7 +251,7 @@ async fn announce(
     let compact = parse_compact(first(&params, "compact"))?;
     let peer = Peer {
         peer_id,
-        ip: remote.ip(),
+        ip: client_ip,
         port,
         left,
         last_seen: unix_timestamp(),
@@ -230,7 +265,7 @@ async fn announce(
     Ok(bencoded_response(announce_payload(
         stats,
         peers,
-        remote.ip(),
+        client_ip,
         context.config.announce_interval,
         compact,
     )))
@@ -239,9 +274,16 @@ async fn announce(
 async fn scrape(
     State(context): State<AppContext>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
-    tracker_gate(&context, remote.ip())?;
+    let client_ip = resolve_client_ip(
+        remote.ip(),
+        &headers,
+        &context.config.trusted_proxy_cidrs,
+        &context.config.client_ip_header,
+    )?;
+    tracker_gate(&context, client_ip)?;
     let params = parse_query(query.as_deref().unwrap_or_default())?;
     let format = scrape_format(first(&params, "format"))?;
     let body = match params.get("info_hash") {
@@ -250,14 +292,14 @@ async fn scrape(
                 .iter()
                 .map(|value| identifier(value, "info_hash"))
                 .collect::<Result<Vec<_>, _>>()?;
-            scrape_payload(&context.state, hashes)
+            Bytes::from(scrape_payload(&context.state, hashes))
         }
         None => {
             let revision = context.state.revision();
             if let Some(body) = context.scrape_cache.get(revision) {
                 body
             } else {
-                let body = scrape_payload(&context.state, context.state.info_hashes());
+                let body = Bytes::from(scrape_payload(&context.state, context.state.info_hashes()));
                 context.scrape_cache.insert(revision, body.clone());
                 body
             }
@@ -278,10 +320,24 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
-async fn statistics(
+async fn statistics(State(context): State<AppContext>) -> Json<StatisticsResponse> {
+    let summary = context.state.summary();
+    let uptime_seconds = context.started_at.elapsed().as_secs();
+    let traffic = context.metrics.traffic_snapshot();
+    Json(StatisticsResponse {
+        version: build_version(),
+        protocol: context.protocol,
+        summary,
+        uptime_seconds,
+        total_requests: traffic.total_requests,
+        request_per_second: traffic.tracker_requests_last_second,
+    })
+}
+
+async fn history(
     State(context): State<AppContext>,
-    Query(query): Query<StatisticsQuery>,
-) -> Result<Json<StatisticsResponse>, ApiError> {
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<DashboardHistory>, ApiError> {
     let (days, bucket_seconds) = match query.period.as_deref().unwrap_or("day") {
         "day" => (1, 5 * 60),
         "week" => (7, 60 * 60),
@@ -289,8 +345,6 @@ async fn statistics(
         _ => return Err(ApiError::bad_request("period must be day, week, or month")),
     };
     let summary = context.state.summary();
-    let uptime_seconds = context.started_at.elapsed().as_secs();
-    let traffic = context.metrics.traffic_snapshot();
     let mut history = context
         .persistence
         .dashboard_history(days, bucket_seconds)
@@ -313,15 +367,7 @@ async fn statistics(
     } else {
         history.metrics.push(current);
     }
-    Ok(Json(StatisticsResponse {
-        version: build_version(),
-        protocol: context.protocol,
-        summary,
-        uptime_seconds,
-        total_requests: traffic.total_requests,
-        requests_per_second: traffic.requests_per_second(),
-        history,
-    }))
+    Ok(Json(history))
 }
 
 fn build_version() -> &'static str {
@@ -379,20 +425,51 @@ fn tracker_gate(context: &AppContext, ip: IpAddr) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn resolve_client_ip(
+    remote_ip: IpAddr,
+    headers: &HeaderMap,
+    trusted_proxy_cidrs: &[ipnet::IpNet],
+    client_ip_header: &HeaderName,
+) -> Result<IpAddr, ApiError> {
+    if !trusted_proxy_cidrs
+        .iter()
+        .any(|network| network.contains(&remote_ip))
+    {
+        return Ok(remote_ip);
+    }
+
+    let value = headers.get(client_ip_header).ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "trusted proxy request is missing {client_ip_header}"
+        ))
+    })?;
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::bad_request(format!("{client_ip_header} is not valid ASCII")))?;
+    value
+        .parse()
+        .map_err(|_| ApiError::bad_request(format!("{client_ip_header} is not a valid IP address")))
+}
+
 fn update_population(context: &AppContext) {
     context
         .metrics
         .set_population(context.state.peer_count(), context.state.swarm_count());
 }
 
-type QueryParams = HashMap<String, Vec<Vec<u8>>>;
+type QueryParams<'a> = HashMap<Cow<'a, str>, Vec<Cow<'a, [u8]>>>;
 
-fn parse_query(query: &str) -> Result<QueryParams, ApiError> {
+fn parse_query(query: &str) -> Result<QueryParams<'_>, ApiError> {
     let mut params = HashMap::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = String::from_utf8(percent_decode(key)?)
-            .map_err(|_| ApiError::bad_request("query key is not valid UTF-8"))?;
+        let key = match percent_decode(key)? {
+            Cow::Borrowed(_) => Cow::Borrowed(key),
+            Cow::Owned(key) => Cow::Owned(
+                String::from_utf8(key)
+                    .map_err(|_| ApiError::bad_request("query key is not valid UTF-8"))?,
+            ),
+        };
         params
             .entry(key)
             .or_insert_with(Vec::new)
@@ -401,8 +478,11 @@ fn parse_query(query: &str) -> Result<QueryParams, ApiError> {
     Ok(params)
 }
 
-fn percent_decode(value: &str) -> Result<Vec<u8>, ApiError> {
+fn percent_decode(value: &str) -> Result<Cow<'_, [u8]>, ApiError> {
     let bytes = value.as_bytes();
+    if !bytes.iter().any(|byte| matches!(byte, b'%' | b'+')) {
+        return Ok(Cow::Borrowed(bytes));
+    }
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
@@ -424,7 +504,7 @@ fn percent_decode(value: &str) -> Result<Vec<u8>, ApiError> {
             }
         }
     }
-    Ok(decoded)
+    Ok(Cow::Owned(decoded))
 }
 
 fn hex_digit(value: u8) -> Result<u8, ApiError> {
@@ -436,7 +516,7 @@ fn hex_digit(value: u8) -> Result<u8, ApiError> {
     }
 }
 
-fn required_identifier(params: &QueryParams, name: &'static str) -> Result<[u8; 20], ApiError> {
+fn required_identifier(params: &QueryParams<'_>, name: &'static str) -> Result<[u8; 20], ApiError> {
     identifier(
         first(params, name).ok_or_else(|| ApiError::bad_request(format!("missing {name}")))?,
         name,
@@ -450,14 +530,14 @@ fn identifier(value: &[u8], name: &'static str) -> Result<[u8; 20], ApiError> {
         .map_err(|_| ApiError::bad_request(format!("{name} must be 20 bytes, got {length}")))
 }
 
-fn required_number<T>(params: &QueryParams, name: &'static str) -> Result<T, ApiError>
+fn required_number<T>(params: &QueryParams<'_>, name: &'static str) -> Result<T, ApiError>
 where
     T: std::str::FromStr,
 {
     optional_number(params, name)?.ok_or_else(|| ApiError::bad_request(format!("missing {name}")))
 }
 
-fn optional_number<T>(params: &QueryParams, name: &'static str) -> Result<Option<T>, ApiError>
+fn optional_number<T>(params: &QueryParams<'_>, name: &'static str) -> Result<Option<T>, ApiError>
 where
     T: std::str::FromStr,
 {
@@ -471,11 +551,11 @@ where
         .map_err(|_| ApiError::bad_request(format!("invalid {name}")))
 }
 
-fn first<'a>(params: &'a QueryParams, name: &str) -> Option<&'a [u8]> {
+fn first<'a>(params: &'a QueryParams<'_>, name: &str) -> Option<&'a [u8]> {
     params
         .get(name)
         .and_then(|values| values.first())
-        .map(Vec::as_slice)
+        .map(AsRef::as_ref)
 }
 
 fn parse_event(value: Option<&[u8]>) -> Result<AnnounceEvent, ApiError> {
@@ -538,13 +618,12 @@ fn scrape_payload(state: &TrackerState, mut hashes: Vec<InfoHash>) -> Vec<u8> {
         let stats = state.stats(&info_hash);
         output.extend_from_slice(b"20:");
         output.extend_from_slice(&info_hash);
-        output.extend_from_slice(
-            format!(
-                "d8:completei{}e10:downloadedi{}e10:incompletei{}ee",
-                stats.complete, stats.downloaded, stats.incomplete
-            )
-            .as_bytes(),
-        );
+        write!(
+            output,
+            "d8:completei{}e10:downloadedi{}e10:incompletei{}ee",
+            stats.complete, stats.downloaded, stats.incomplete
+        )
+        .expect("writing to a Vec cannot fail");
     }
     output.extend_from_slice(b"ee");
     output
@@ -617,9 +696,12 @@ fn scrape_integer(entries: &[(&[u8], BencodeValue<'_>)], key: &[u8]) -> Result<u
 }
 
 fn hex_string(value: &[u8]) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
     let mut encoded = String::with_capacity(value.len() * 2);
     for byte in value {
-        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        encoded.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
     }
     encoded
 }
@@ -652,14 +734,13 @@ fn append_peer_list(output: &mut Vec<u8>, peers: Vec<Peer>, requester: IpAddr) {
         append_bencoded_bytes(output, peer.ip.to_string().as_bytes());
         output.extend_from_slice(b"7:peer id20:");
         output.extend_from_slice(&peer.peer_id);
-        output.extend_from_slice(format!("4:porti{}ee", peer.port).as_bytes());
+        write!(output, "4:porti{}ee", peer.port).expect("writing to a Vec cannot fail");
     }
     output.push(b'e');
 }
 
 fn append_bencoded_bytes(output: &mut Vec<u8>, value: &[u8]) {
-    output.extend_from_slice(value.len().to_string().as_bytes());
-    output.push(b':');
+    write!(output, "{}:", value.len()).expect("writing to a Vec cannot fail");
     output.extend_from_slice(value);
 }
 
@@ -670,11 +751,12 @@ fn same_address_family(left: IpAddr, right: IpAddr) -> bool {
     )
 }
 
-fn bencoded_response(body: Vec<u8>) -> Response {
+fn bencoded_response(body: impl Into<Body>) -> Response {
     let headers = [(
         header::CONTENT_TYPE,
         HeaderValue::from_static(BITTORRENT_CONTENT_TYPE),
     )];
+    let body = body.into();
     (headers, body).into_response()
 }
 
@@ -719,12 +801,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn given_statistics_response_when_serialized_then_history_is_omitted() {
+        let response = StatisticsResponse {
+            version: "test",
+            protocol: Protocol::Http,
+            summary: TrackerSummary::default(),
+            uptime_seconds: 1,
+            total_requests: 2,
+            request_per_second: 12,
+        };
+
+        let serialized =
+            serde_json::to_value(response).expect("statistics response should serialize");
+
+        assert!(serialized.get("history").is_none());
+        assert!(serialized.get("requests_per_second").is_none());
+        assert_eq!(serialized["uptime_seconds"], 1);
+        assert_eq!(serialized["total_requests"], 2);
+        assert_eq!(serialized["request_per_second"], 12);
+    }
+
+    #[test]
     fn given_cached_scrape_when_revision_changes_then_cache_is_invalidated() {
         let cache = ScrapeCache::default();
-        cache.insert(1, b"cached".to_vec());
+        let body = Bytes::from(b"cached".to_vec());
+        let body_pointer = body.as_ptr();
+        cache.insert(1, body);
 
-        assert_eq!(cache.get(1), Some(b"cached".to_vec()));
+        let cached = cache.get(1).expect("cached body should be returned");
+        assert_eq!(cached, Bytes::from_static(b"cached"));
+        assert_eq!(cached.as_ptr(), body_pointer);
         assert_eq!(cache.get(2), None);
+    }
+
+    #[test]
+    fn given_unescaped_query_component_when_decoded_then_input_is_borrowed() {
+        assert!(matches!(
+            percent_decode("uploaded").expect("query component should decode"),
+            Cow::Borrowed(b"uploaded")
+        ));
+        assert!(matches!(
+            percent_decode("%75ploaded").expect("query component should decode"),
+            Cow::Owned(value) if value == b"uploaded"
+        ));
     }
 
     #[test]
@@ -767,6 +886,69 @@ mod tests {
                 .message,
             "missing downloaded"
         );
+    }
+
+    #[test]
+    fn given_untrusted_peer_when_client_header_is_present_then_socket_ip_is_used() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "203.0.113.10".parse().unwrap());
+
+        let client_ip = resolve_client_ip(
+            "198.51.100.20".parse().unwrap(),
+            &headers,
+            &["127.0.0.1/32".parse().unwrap()],
+            &HeaderName::from_static("cf-connecting-ip"),
+        )
+        .expect("untrusted peer should use its socket address");
+
+        assert_eq!(client_ip, "198.51.100.20".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn given_trusted_proxy_when_client_header_is_valid_then_forwarded_ip_is_used() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "203.0.113.10".parse().unwrap());
+
+        let client_ip = resolve_client_ip(
+            "127.0.0.1".parse().unwrap(),
+            &headers,
+            &["127.0.0.1/32".parse().unwrap()],
+            &HeaderName::from_static("cf-connecting-ip"),
+        )
+        .expect("trusted proxy should use the forwarded address");
+
+        assert_eq!(client_ip, "203.0.113.10".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn given_trusted_proxy_without_client_header_then_request_is_rejected() {
+        let error = resolve_client_ip(
+            "127.0.0.1".parse().unwrap(),
+            &HeaderMap::new(),
+            &["127.0.0.1/32".parse().unwrap()],
+            &HeaderName::from_static("cf-connecting-ip"),
+        )
+        .expect_err("trusted proxy must supply the configured header");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("missing cf-connecting-ip"));
+    }
+
+    #[test]
+    fn given_trusted_proxy_with_invalid_client_header_then_request_is_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "not-an-ip".parse().unwrap());
+
+        let error = resolve_client_ip(
+            "127.0.0.1".parse().unwrap(),
+            &headers,
+            &["127.0.0.1/32".parse().unwrap()],
+            &HeaderName::from_static("cf-connecting-ip"),
+        )
+        .expect_err("invalid forwarded address should fail");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("not a valid IP address"));
     }
 
     #[test]

@@ -62,6 +62,16 @@
         }
         h2 { margin: 0 0 5px; font-size: 34px; font-weight: 500; }
         .subtitle, .updated { font-size: 14px; }
+        .heading-status { display: flex; align-items: center; gap: 18px; }
+        .realtime {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            padding-left: 18px;
+            border-left: 1px solid var(--line);
+        }
+        .realtime .label { white-space: nowrap; }
+        .realtime-value { font: 24px Georgia, serif; }
         .grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -138,6 +148,7 @@
             .metric:nth-last-child(-n+3) { border-bottom: 1px solid var(--line); }
             .metric:nth-last-child(-n+2) { border-bottom: 0; }
             .heading, .chart-header { align-items: flex-start; flex-direction: column; }
+            .heading-status { width: 100%; justify-content: space-between; }
             .transfer { grid-template-columns: 1fr 1fr; }
             .transfer > div { padding-bottom: 16px; }
             .transfer > div:nth-child(odd) { padding-left: 0; border-left: 0; }
@@ -164,7 +175,13 @@
     <main>
         <div class="heading">
             <div><h2>Tracker overview</h2><div class="subtitle">Live health and historical swarm activity</div></div>
-            <div class="updated" id="updated">Connecting</div>
+            <div class="heading-status">
+                <div class="updated" id="updated">Connecting</div>
+                <div class="realtime">
+                    <span class="label">Tracker RPS</span>
+                    <strong class="realtime-value" id="trackerRps">-</strong>
+                </div>
+            </div>
         </div>
         <section class="grid" aria-label="Current tracker metrics">
             <div class="metric"><div class="label">Peers</div><div class="value" id="peers">-</div></div>
@@ -309,20 +326,16 @@
 
         async function loadStats() {
             try {
-                const response = await fetch(`/stats?period=${activePeriod}`, { cache: 'no-store' });
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const response = await fetch('/stats', { cache: 'no-store' });
+                if (!response.ok) throw new Error(`/stats returned HTTP ${response.status}`);
                 const data = await response.json();
                 for (const key of ['peers', 'seeders', 'leechers', 'torrents', 'completed']) {
                     byId(key).textContent = data[key].toLocaleString();
                 }
                 byId('uptime').textContent = formatDuration(data.uptime_seconds);
-                byId('ingress').textContent = formatBytes(data.history.total_ingress_bytes);
-                byId('egress').textContent = formatBytes(data.history.total_egress_bytes);
-                byId('transferPeriod').textContent = periods[activePeriod];
+                byId('trackerRps').textContent = data.request_per_second.toLocaleString();
                 byId('protocol').textContent = `Active protocol: ${data.protocol.toUpperCase()}`;
                 byId('version').textContent = 'v' + data.version;
-                history = data.history.metrics;
-                drawChart();
                 byId('status').textContent = 'Online';
                 byId('connection').classList.remove('offline');
                 byId('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -335,17 +348,36 @@
             }
         }
 
+        async function loadHistory() {
+            try {
+                const response = await fetch(`/history?period=${activePeriod}`, { cache: 'no-store' });
+                if (!response.ok) throw new Error(`/history returned HTTP ${response.status}`);
+                const data = await response.json();
+                byId('ingress').textContent = formatBytes(data.total_ingress_bytes);
+                byId('egress').textContent = formatBytes(data.total_egress_bytes);
+                byId('transferPeriod').textContent = periods[activePeriod];
+                history = data.metrics;
+                drawChart();
+            } catch (error) {
+                byId('empty').hidden = false;
+                byId('empty').textContent = `Unable to load history: ${error.message}`;
+                byId('empty').classList.add('error');
+            }
+        }
+
         document.querySelectorAll('[data-period]').forEach(button => {
             button.addEventListener('click', () => {
                 activePeriod = button.dataset.period;
                 document.querySelectorAll('[data-period]').forEach(item =>
                     item.setAttribute('aria-pressed', String(item === button)));
-                loadStats();
+                loadHistory();
             });
         });
         window.addEventListener('resize', () => trendChart?.resize());
         loadStats();
-        setInterval(loadStats, 30000);
+        loadHistory();
+        setInterval(loadStats, 5000);
+        setInterval(loadHistory, 30000);
     </script>
 </body>
 </html>

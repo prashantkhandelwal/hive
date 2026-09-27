@@ -34,22 +34,22 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary: hive-tracker
-            archive: hive-tracker-x86_64-unknown-linux-gnu.tar.gz
+            archive: hive-tracker-linux-x86_64-gnu.tar.gz
             build_tool: cargo
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             binary: hive-tracker
-            archive: hive-tracker-x86_64-unknown-linux-musl.tar.gz
+            archive: hive-tracker-linux-x86_64-musl.tar.gz
             build_tool: cross
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary: hive-tracker
-            archive: hive-tracker-aarch64-unknown-linux-gnu.tar.gz
+            archive: hive-tracker-linux-aarch64-gnu.tar.gz
             build_tool: cross
           - os: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
             binary: hive-tracker
-            archive: hive-tracker-armv7-unknown-linux-gnueabihf.tar.gz
+            archive: hive-tracker-linux-armv7-gnu.tar.gz
             build_tool: cross
           - os: windows-latest
             target: x86_64-pc-windows-msvc
