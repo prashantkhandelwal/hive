@@ -1,13 +1,14 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use prometheus::{
     Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use serde::Serialize;
+
+use crate::state::unix_timestamp;
 
 const TRAFFIC_WINDOW_SECONDS: u64 = 60;
 
@@ -312,13 +313,6 @@ impl AppMetrics {
 fn prune_window(window: &mut TrafficWindow, second: u64) {
     let cutoff = second.saturating_sub(TRAFFIC_WINDOW_SECONDS - 1);
     window.buckets.retain(|bucket| bucket.second >= cutoff);
-}
-
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]
