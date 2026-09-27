@@ -335,7 +335,7 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -350,7 +350,7 @@
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "auto",
-        "orientation": "auto",
+        "orientation": "vertical",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -358,18 +358,34 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto",
-        "wideLayout": true
+        "textMode": "valueAndName",
+        "wideLayout": false
       },
       "pluginVersion": "12.2.0",
       "targets": [
         {
           "editorMode": "code",
-          "expr": "hive_uptime_seconds",
+          "expr": "floor(hive_uptime_seconds / 86400)",
           "instant": true,
-          "legendFormat": "Uptime",
+          "legendFormat": "Days",
           "range": false,
           "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "floor((hive_uptime_seconds % 86400) / 3600)",
+          "instant": true,
+          "legendFormat": "Hours",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "floor((hive_uptime_seconds % 3600) / 60)",
+          "instant": true,
+          "legendFormat": "Minutes",
+          "range": false,
+          "refId": "C"
         }
       ],
       "title": "Uptime",
