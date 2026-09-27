@@ -10,7 +10,22 @@ peer_timeout = 3600
 persistence_interval = 30
 rate_limit_per_minute = 500
 max_concurrent_http_requests = 128
-trusted_proxy_cidrs = []
+
+# Below setting is for cloudflared tunnel. When
+# both tunnel and hive are running on the same server.
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+
+# For Docker, supported trusted CIDR range is
+# trusted_proxy_cidrs = ["172.20.0.0/16"]
+
+# CAUTION: DO NOT ever set the seeting like this
+# trusted_proxy_cidrs = ["0.0.0.0/0", "::/0"]
+# This ould trust forwarding headers from every client
+# and let attackers forge IP addresses to bypass rate limiting.
+
+# Keep the below setting unless Hive is behind a reverse proxy whose 
+# direct source address or network you know and trust. 
+#trusted_proxy_cidrs = []
 client_ip_header = "cf-connecting-ip"
 log_filter = "hive_tracker=info"
 
