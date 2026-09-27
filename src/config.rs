@@ -43,6 +43,7 @@ pub struct AppConfig {
     pub enable_http_scrape: bool,
     pub enable_udp_scrape: bool,
     pub http_addr: SocketAddr,
+    pub admin_addr: Option<SocketAddr>,
     pub udp_addr: SocketAddr,
     pub database_path: PathBuf,
     pub announce_interval: u32,
@@ -80,6 +81,7 @@ struct FileConfig {
     enable_http_scrape: bool,
     enable_udp_scrape: bool,
     http_addr: SocketAddr,
+    admin_addr: Option<SocketAddr>,
     udp_addr: SocketAddr,
     database_path: PathBuf,
     announce_interval: u32,
@@ -99,6 +101,7 @@ impl Default for FileConfig {
             http_addr: "0.0.0.0:3000"
                 .parse()
                 .expect("default HTTP address is valid"),
+            admin_addr: None,
             udp_addr: "0.0.0.0:6969"
                 .parse()
                 .expect("default UDP address is valid"),
@@ -141,6 +144,13 @@ impl FileConfig {
             max_concurrent_http_requests
         );
 
+        if let Some(raw) = value("HIVE_ADMIN_ADDR")? {
+            self.admin_addr = if raw.is_empty() {
+                None
+            } else {
+                Some(parse_environment_value("HIVE_ADMIN_ADDR", &raw)?)
+            };
+        }
         if let Some(raw) = value("HIVE_DATABASE_PATH")? {
             if raw.is_empty() {
                 return Err(anyhow!("HIVE_DATABASE_PATH cannot be empty"));
@@ -179,6 +189,7 @@ impl From<FileConfig> for AppConfig {
             enable_http_scrape: config.enable_http_scrape,
             enable_udp_scrape: config.enable_udp_scrape,
             http_addr: config.http_addr,
+            admin_addr: config.admin_addr,
             udp_addr: config.udp_addr,
             database_path: config.database_path,
             announce_interval: config.announce_interval,
@@ -208,6 +219,7 @@ mod tests {
             r#"
                 default_protocol = "udp"
                 http_addr = "127.0.0.1:8080"
+                admin_addr = "127.0.0.1:8081"
                 peer_timeout = 90
                 max_concurrent_http_requests = 64
             "#,
@@ -216,6 +228,7 @@ mod tests {
 
         assert_eq!(config.default_protocol, Protocol::Udp);
         assert_eq!(config.http_addr, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.admin_addr, Some("127.0.0.1:8081".parse().unwrap()));
         assert_eq!(config.peer_timeout, Duration::from_secs(90));
         assert_eq!(config.udp_addr, "0.0.0.0:6969".parse().unwrap());
         assert_eq!(config.max_concurrent_http_requests, 64);
@@ -226,6 +239,7 @@ mod tests {
         let config = AppConfig::from_toml("").expect("default configuration should parse");
 
         assert_eq!(config.max_concurrent_http_requests, 128);
+        assert_eq!(config.admin_addr, None);
     }
 
     #[test]
@@ -243,6 +257,7 @@ mod tests {
             ("HIVE_ENABLE_HTTP_SCRAPE", "false"),
             ("HIVE_ENABLE_UDP_SCRAPE", "false"),
             ("HIVE_HTTP_ADDR", "127.0.0.1:8080"),
+            ("HIVE_ADMIN_ADDR", "127.0.0.1:8081"),
             ("HIVE_UDP_ADDR", "127.0.0.1:6968"),
             ("HIVE_DATABASE_PATH", "/data/custom.db"),
             ("HIVE_ANNOUNCE_INTERVAL", "900"),
@@ -262,6 +277,7 @@ mod tests {
         assert!(!config.enable_http_scrape);
         assert!(!config.enable_udp_scrape);
         assert_eq!(config.http_addr, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.admin_addr, Some("127.0.0.1:8081".parse().unwrap()));
         assert_eq!(config.udp_addr, "127.0.0.1:6968".parse().unwrap());
         assert_eq!(config.database_path, PathBuf::from("/data/custom.db"));
         assert_eq!(config.announce_interval, 900);

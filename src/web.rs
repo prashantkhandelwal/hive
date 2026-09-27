@@ -124,21 +124,48 @@ struct ApiError {
 }
 
 pub fn router(context: AppContext, enable_http_tracker: bool) -> Router {
-    let app_metrics = context.metrics.clone();
-    let config = &context.config;
-    let max_concurrent_http_requests = config.max_concurrent_http_requests;
-    let mut router = Router::new().route("/", get(index));
-    if config.enable_http_scrape {
-        router = router.route("/scrape", get(scrape));
-    }
-    router = router
+    let mut router = Router::new()
+        .route("/", get(index))
         .route("/stats", get(statistics))
         .route("/history", get(history))
         .route("/metrics", get(metrics))
         .route("/health", get(health));
+    router = add_tracker_routes(router, &context, enable_http_tracker);
+    finish_router(router, context)
+}
+
+pub fn tracker_router(context: AppContext, enable_http_tracker: bool) -> Router {
+    let router = Router::new().route("/health", get(health));
+    let router = add_tracker_routes(router, &context, enable_http_tracker);
+    finish_router(router, context)
+}
+
+pub fn admin_router(context: AppContext) -> Router {
+    let router = Router::new()
+        .route("/", get(index))
+        .route("/stats", get(statistics))
+        .route("/history", get(history))
+        .route("/metrics", get(metrics));
+    finish_router(router, context)
+}
+
+fn add_tracker_routes(
+    mut router: Router<AppContext>,
+    context: &AppContext,
+    enable_http_tracker: bool,
+) -> Router<AppContext> {
+    if context.config.enable_http_scrape {
+        router = router.route("/scrape", get(scrape));
+    }
     if enable_http_tracker {
         router = router.route("/announce", get(announce));
     }
+    router
+}
+
+fn finish_router(router: Router<AppContext>, context: AppContext) -> Router {
+    let app_metrics = context.metrics.clone();
+    let max_concurrent_http_requests = context.config.max_concurrent_http_requests;
     let router = router.with_state(context);
     router
         .layer(middleware::from_fn_with_state(app_metrics, observe_traffic))
