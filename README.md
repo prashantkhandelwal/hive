@@ -88,6 +88,7 @@ Hive reads configuration from `hive.toml` in the working directory.
 | --- | --- | --- |
 | `default_protocol` | `both` | Listener mode: `http`, `udp`, or `both` |
 | `http_addr` | `0.0.0.0:3000` | Web UI and HTTP tracker listen address |
+| `admin_addr` | Not set | Optional private dashboard, statistics, history, and metrics listen address |
 | `udp_addr` | `0.0.0.0:6969` | UDP tracker listen address |
 | `database_path` | `hive.db` | SQLite database path |
 | `announce_interval` | `1800` | Client reannounce interval in seconds |
@@ -112,9 +113,13 @@ can be comma-separated. Keep production deployments at `info` or quieter:
 per-request debug logging is intentionally opt-in because synchronous formatting
 and log output reduce announce throughput.
 
-The dashboard, tracker endpoints, aggregate statistics, and health endpoint are
-public. Per-source-IP rate limiting protects HTTP and UDP tracker traffic, and
-the UDP tracker uses short-lived source-bound connection IDs.
+By default, the dashboard, tracker endpoints, aggregate statistics, and health
+endpoint share `http_addr` and are public. Set `admin_addr` to a private address,
+such as `127.0.0.1:3001`, to move `/`, `/stats`, `/history`, and `/metrics` to a
+separate listener. The public listener then exposes only `/announce`, `/scrape`
+when enabled, and `/health`. Do not bind or publish the admin listener on an
+untrusted network. Per-source-IP rate limiting protects HTTP and UDP tracker
+traffic, and the UDP tracker uses short-lived source-bound connection IDs.
 
 ## Linux systemd service
 
@@ -190,6 +195,7 @@ Environment variables override values from `/etc/hive/hive.toml`:
 | `HIVE_ENABLE_HTTP_SCRAPE` | `true` | Enable the HTTP scrape endpoint |
 | `HIVE_ENABLE_UDP_SCRAPE` | `true` | Enable the UDP scrape action |
 | `HIVE_HTTP_ADDR` | `0.0.0.0:3000` | HTTP listen address inside the container |
+| `HIVE_ADMIN_ADDR` | `0.0.0.0:3001` | Optional private admin listen address; empty keeps the combined listener |
 | `HIVE_UDP_ADDR` | `0.0.0.0:6969` | UDP listen address inside the container |
 | `HIVE_DATABASE_PATH` | `/data/hive.db` | SQLite database path |
 | `HIVE_ANNOUNCE_INTERVAL` | `1800` | Client reannounce interval in seconds |
@@ -218,6 +224,11 @@ Alternatively, use the included Compose configuration:
 ```powershell
 docker compose up --detach
 ```
+
+To enable the private admin listener with Compose, set
+`HIVE_ADMIN_ADDR=0.0.0.0:3001` and expose it only on a trusted interface or to a
+private reverse proxy. For local-only host access, add
+`127.0.0.1:3001:3001` to the service's `ports` list.
 
 Build a local image directly from the repository with:
 
