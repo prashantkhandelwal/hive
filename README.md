@@ -333,6 +333,20 @@ Alternatively, use the included Compose configuration:
 docker compose up --detach
 ```
 
+This also starts Prometheus and a provisioned Grafana instance. Open
+`http://localhost:3002/d/hive-stats` for the **Hive Tracker Stats** dashboard
+and sign in with the `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD` values
+from `.env` (both default to `admin` for local use). Change the password before
+making Grafana available beyond localhost. Prometheus is available locally at
+`http://localhost:9090`.
+
+Prometheus retains 30 days of metrics and scrapes Hive every five seconds. The
+dashboard mirrors the built-in stats page and adds request, traffic, result,
+and announce-event panels. Its data source and dashboard are provisioned from
+`monitoring/`. If `HIVE_ADMIN_ADDR` is enabled, update the target in
+`monitoring/prometheus.yml` from `hive:3000` to the configured admin port,
+because `/metrics` moves to the private admin listener.
+
 To enable the private admin listener with Compose, set
 `HIVE_ADMIN_ADDR=0.0.0.0:3001` and expose it only on a trusted interface or to a
 private reverse proxy. For local-only host access, add

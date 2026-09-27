@@ -21,6 +21,17 @@ pub enum AnnounceEvent {
     Update,
 }
 
+impl AnnounceEvent {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Completed => "completed",
+            Self::Stopped => "stopped",
+            Self::Update => "update",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Peer {
     pub peer_id: PeerId,
