@@ -96,6 +96,8 @@ Hive reads configuration from `hive.toml` in the working directory.
 | `persistence_interval` | `30` | Snapshot interval in seconds |
 | `rate_limit_per_minute` | `120` | Per-source-IP request allowance |
 | `max_concurrent_http_requests` | `128` | Maximum HTTP requests processed concurrently |
+| `trusted_proxy_cidrs` | `[]` | Proxy networks allowed to provide the client IP header |
+| `client_ip_header` | `cf-connecting-ip` | Client IP header accepted from trusted proxies |
 | `log_filter` | `hive_tracker=info` | Tracing filter and verbosity |
 
 Use `--config path/to/config.toml` to load another file. The `--protocol`
@@ -106,6 +108,112 @@ headroom above the observed throughput optimum near 64 in-flight requests.
 Requests above the configured limit wait until capacity is available. The
 limit applies to all HTTP routes and does not affect the UDP listener. Values
 must be greater than zero.
+
+### Cloudflare Tunnel and trusted reverse proxies
+
+Hive uses the direct connection address for HTTP rate limiting and peer
+registration by default. Behind Cloudflare Tunnel, that address belongs to
+`cloudflared`, so every visitor would otherwise share one rate-limit bucket.
+Cloudflare supplies the original visitor address in `CF-Connecting-IP`.
+
+Hive accepts that header only when the direct connection comes from a network
+listed in `trusted_proxy_cidrs`. Requests from all other addresses ignore the
+header, preventing public clients from bypassing rate limits with a forged
+value. Never configure `0.0.0.0/0` or `::/0` as a trusted proxy network.
+
+#### Native Linux deployment
+
+When Hive and `cloudflared` run on the same host, bind Hive to loopback and
+trust only loopback. Update `/etc/hive/hive.toml`, or the configuration file
+passed to Hive:
+
+```toml
+http_addr = "127.0.0.1:3000"
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+client_ip_header = "cf-connecting-ip"
+rate_limit_per_minute = 500
+```
+
+Point the tunnel at the loopback listener:
+
+```yaml
+ingress:
+  - hostname: tracker.example.com
+    service: http://127.0.0.1:3000
+  - service: http_status:404
+```
+
+Restart both services after changing their configuration:
+
+```bash
+sudo systemctl restart hive-tracker
+sudo systemctl restart cloudflared
+```
+
+Confirm that Hive is not listening on a public interface:
+
+```bash
+sudo ss -ltnp | grep ':3000'
+```
+
+The output should contain `127.0.0.1:3000`, not `0.0.0.0:3000`.
+
+#### Docker deployment
+
+When Hive and `cloudflared` run as containers, attach them to the same private
+Docker network, configure the tunnel origin as `http://hive:3000`, and do not
+publish Hive's TCP port 3000 to the host. Find the private network's subnet:
+
+```bash
+docker network inspect <network-name> \
+  --format '{{(index .IPAM.Config 0).Subnet}}'
+```
+
+Set that subnet and the Cloudflare header in the Compose `.env` file:
+
+```dotenv
+HIVE_TRUSTED_PROXY_CIDRS=172.20.0.0/16
+HIVE_CLIENT_IP_HEADER=cf-connecting-ip
+HIVE_RATE_LIMIT_PER_MINUTE=500
+```
+
+Replace `172.20.0.0/16` with the subnet reported for the private tunnel
+network, then recreate the Hive container:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+If `cloudflared` runs on the host while Hive runs in Docker, bind the published
+port to host loopback:
+
+```yaml
+ports:
+  - "127.0.0.1:3000:3000"
+```
+
+Then trust the source address or narrow CIDR that Docker presents to the Hive
+container. Do not assume it is `127.0.0.1`; inspect the Docker network and use
+the narrowest stable range.
+
+#### Verification and disabling proxy trust
+
+Through the public hostname, `/announce` and `/scrape` now use each visitor's
+`CF-Connecting-IP` value for rate limiting and peer registration. A malformed
+header, or a missing header on a connection from a trusted proxy, returns HTTP
+400. Headers received from an untrusted source are ignored.
+
+If Cloudflare Tunnel is removed, restore the required public bind address and
+disable proxy trust:
+
+```toml
+http_addr = "0.0.0.0:3000"
+trusted_proxy_cidrs = []
+```
+
+The `client_ip_header` value can remain configured because it is ignored when
+`trusted_proxy_cidrs` is empty. Cloudflare Tunnel carries HTTP traffic only;
+the UDP tracker on port 6969 requires separate direct UDP exposure.
 
 Set `log_filter` to a tracing directive such as `hive_tracker=trace` for maximum
 detail or `hive_tracker=info` for quieter operational logs. Multiple directives
