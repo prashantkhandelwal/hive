@@ -152,8 +152,14 @@ impl UdpTracker {
             .state
             .announce_with_peers(info_hash, peer, event, limit);
         self.metrics.announce("udp", event_name(event));
-        self.metrics
-            .set_population(self.state.peer_count(), self.state.swarm_count());
+        let summary = self.state.summary();
+        self.metrics.set_population(
+            summary.peers,
+            summary.seeders,
+            summary.leechers,
+            summary.torrents,
+            summary.completed,
+        );
         self.metrics.request("udp", "announce", "ok");
 
         let mut response = Vec::with_capacity(20 + peers.len() * 18);

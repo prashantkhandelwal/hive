@@ -448,9 +448,14 @@ fn resolve_client_ip(
 }
 
 fn update_population(context: &AppContext) {
-    context
-        .metrics
-        .set_population(context.state.peer_count(), context.state.swarm_count());
+    let summary = context.state.summary();
+    context.metrics.set_population(
+        summary.peers,
+        summary.seeders,
+        summary.leechers,
+        summary.torrents,
+        summary.completed,
+    );
 }
 
 type QueryParams<'a> = HashMap<Cow<'a, str>, Vec<Cow<'a, [u8]>>>;
