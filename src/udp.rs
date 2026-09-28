@@ -118,10 +118,10 @@ impl UdpTracker {
             self.metrics.request("udp", "announce", "invalid");
             return error_response(transaction_id, "invalid announce request");
         }
-        let Some(info_hash) = slice_array(packet, 16) else {
+        let Some(info_hash) = read_array(packet, 16) else {
             return error_response(transaction_id, "missing info hash");
         };
-        let Some(peer_id) = slice_array(packet, 36) else {
+        let Some(peer_id) = read_array(packet, 36) else {
             return error_response(transaction_id, "missing peer id");
         };
         let left = read_u64(packet, 64).unwrap_or_default();
@@ -151,9 +151,15 @@ impl UdpTracker {
         let (stats, peers) = self
             .state
             .announce_with_peers(info_hash, peer, event, limit);
-        self.metrics.announce("udp", event_name(event));
-        self.metrics
-            .set_population(self.state.peer_count(), self.state.swarm_count());
+        self.metrics.announce("udp", event.as_str());
+        let summary = self.state.summary();
+        self.metrics.set_population(
+            summary.peers,
+            summary.seeders,
+            summary.leechers,
+            summary.torrents,
+            summary.completed,
+        );
         self.metrics.request("udp", "announce", "ok");
 
         let mut response = Vec::with_capacity(20 + peers.len() * 18);
@@ -211,31 +217,23 @@ fn time_window() -> u64 {
 }
 
 fn read_u16(packet: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_be_bytes(
-        packet.get(offset..offset + 2)?.try_into().ok()?,
-    ))
+    read_array(packet, offset).map(u16::from_be_bytes)
 }
 
 fn read_u32(packet: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_be_bytes(
-        packet.get(offset..offset + 4)?.try_into().ok()?,
-    ))
+    read_array(packet, offset).map(u32::from_be_bytes)
 }
 
 fn read_i32(packet: &[u8], offset: usize) -> Option<i32> {
-    Some(i32::from_be_bytes(
-        packet.get(offset..offset + 4)?.try_into().ok()?,
-    ))
+    read_array(packet, offset).map(i32::from_be_bytes)
 }
 
 fn read_u64(packet: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_be_bytes(
-        packet.get(offset..offset + 8)?.try_into().ok()?,
-    ))
+    read_array(packet, offset).map(u64::from_be_bytes)
 }
 
-fn slice_array(packet: &[u8], offset: usize) -> Option<[u8; 20]> {
-    packet.get(offset..offset + 20)?.try_into().ok()
+fn read_array<const N: usize>(packet: &[u8], offset: usize) -> Option<[u8; N]> {
+    packet.get(offset..offset + N)?.try_into().ok()
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u32) {
@@ -262,15 +260,6 @@ fn append_compact_peers(output: &mut Vec<u8>, peers: Vec<Peer>, requester: IpAdd
             _ => continue,
         }
         output.extend_from_slice(&peer.port.to_be_bytes());
-    }
-}
-
-fn event_name(event: AnnounceEvent) -> &'static str {
-    match event {
-        AnnounceEvent::Started => "started",
-        AnnounceEvent::Completed => "completed",
-        AnnounceEvent::Stopped => "stopped",
-        AnnounceEvent::Update => "update",
     }
 }
 

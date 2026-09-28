@@ -56,7 +56,14 @@ async fn main() -> Result<()> {
     persistence.load(&state).await?;
     state.remove_stale(config.peer_timeout);
     let metrics = AppMetrics::new()?;
-    metrics.set_population(state.peer_count(), state.swarm_count());
+    let summary = state.summary();
+    metrics.set_population(
+        summary.peers,
+        summary.seeders,
+        summary.leechers,
+        summary.torrents,
+        summary.completed,
+    );
     let started_at = Instant::now();
     persistence
         .record_dashboard_snapshot(state.summary(), 0, metrics.traffic_snapshot())

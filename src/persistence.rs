@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     metrics::TrafficSnapshot,
-    state::{Peer, PeerId, TrackerState, TrackerSummary},
+    state::{unix_timestamp, Peer, PeerId, TrackerState, TrackerSummary},
 };
 
 pub type Result<T> = std::result::Result<T, PersistenceError>;
@@ -449,13 +449,6 @@ fn sqlite_integer(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
 
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,8 +527,8 @@ mod tests {
         let database_path = std::env::temp_dir().join(format!(
             "hive-incremental-persistence-{}-{}.db",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()
         ));
