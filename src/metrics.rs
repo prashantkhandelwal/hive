@@ -1,13 +1,14 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use prometheus::{
     Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use serde::Serialize;
+
+use crate::state::unix_timestamp;
 
 const TRAFFIC_WINDOW_SECONDS: u64 = 60;
 
@@ -92,7 +93,12 @@ pub struct AppMetrics {
     requests_per_second: IntGauge,
     tracker_requests_last_second: IntGauge,
     active_peers: IntGauge,
+    active_seeders: IntGauge,
+    active_leechers: IntGauge,
     active_swarms: IntGauge,
+    completed_downloads: IntGauge,
+    uptime_seconds: IntGauge,
+    started_at: std::time::Instant,
     traffic_window: Arc<Mutex<TrafficWindow>>,
 }
 
@@ -140,7 +146,16 @@ impl AppMetrics {
             "HTTP tracker requests and UDP packets handled during the last completed second",
         )?;
         let active_peers = IntGauge::new("hive_active_peers", "Peers currently in memory")?;
+        let active_seeders = IntGauge::new("hive_active_seeders", "Seeders currently in memory")?;
+        let active_leechers =
+            IntGauge::new("hive_active_leechers", "Leechers currently in memory")?;
         let active_swarms = IntGauge::new("hive_active_swarms", "Swarms currently in memory")?;
+        let completed_downloads = IntGauge::new(
+            "hive_completed_downloads",
+            "Completed downloads currently recorded",
+        )?;
+        let uptime_seconds =
+            IntGauge::new("hive_uptime_seconds", "Hive process uptime in seconds")?;
 
         registry.register(Box::new(requests.clone()))?;
         registry.register(Box::new(announce_events.clone()))?;
@@ -150,7 +165,11 @@ impl AppMetrics {
         registry.register(Box::new(requests_per_second.clone()))?;
         registry.register(Box::new(tracker_requests_last_second.clone()))?;
         registry.register(Box::new(active_peers.clone()))?;
+        registry.register(Box::new(active_seeders.clone()))?;
+        registry.register(Box::new(active_leechers.clone()))?;
         registry.register(Box::new(active_swarms.clone()))?;
+        registry.register(Box::new(completed_downloads.clone()))?;
+        registry.register(Box::new(uptime_seconds.clone()))?;
         let traffic_counters = TrafficCounters {
             torrent_http_requests: traffic_requests.with_label_values(&["torrent_http"]),
             torrent_http_ingress: traffic_bytes.with_label_values(&["torrent_http", "ingress"]),
@@ -172,7 +191,12 @@ impl AppMetrics {
             requests_per_second,
             tracker_requests_last_second,
             active_peers,
+            active_seeders,
+            active_leechers,
             active_swarms,
+            completed_downloads,
+            uptime_seconds,
+            started_at: std::time::Instant::now(),
             traffic_window: Arc::new(Mutex::new(TrafficWindow::default())),
         })
     }
@@ -207,13 +231,25 @@ impl AppMetrics {
         self.traffic_snapshot_at(unix_timestamp())
     }
 
-    pub fn set_population(&self, peers: usize, swarms: usize) {
+    pub fn set_population(
+        &self,
+        peers: usize,
+        seeders: usize,
+        leechers: usize,
+        swarms: usize,
+        completed: u64,
+    ) {
         self.active_peers.set(peers as i64);
+        self.active_seeders.set(seeders as i64);
+        self.active_leechers.set(leechers as i64);
         self.active_swarms.set(swarms as i64);
+        self.completed_downloads.set(completed as i64);
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, prometheus::Error> {
         self.traffic_snapshot();
+        self.uptime_seconds
+            .set(self.started_at.elapsed().as_secs() as i64);
         let families = self.registry.gather();
         let mut output = Vec::new();
         TextEncoder::new().encode(&families, &mut output)?;
@@ -314,13 +350,6 @@ fn prune_window(window: &mut TrafficWindow, second: u64) {
     window.buckets.retain(|bucket| bucket.second >= cutoff);
 }
 
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +443,22 @@ mod tests {
 
         assert_eq!(snapshot.tracker_requests_last_second, 0);
         assert_eq!(metrics.tracker_requests_last_second.get(), 0);
+    }
+
+    #[test]
+    fn given_population_when_encoded_then_stats_page_metrics_are_exported() {
+        let metrics = AppMetrics::new().expect("metrics should initialize");
+        metrics.set_population(10, 4, 6, 3, 7);
+
+        let encoded = String::from_utf8(metrics.encode().expect("metrics should encode"))
+            .expect("metrics should be UTF-8");
+
+        assert!(encoded.contains("hive_active_peers 10"));
+        assert!(encoded.contains("hive_active_seeders 4"));
+        assert!(encoded.contains("hive_active_leechers 6"));
+        assert!(encoded.contains("hive_active_swarms 3"));
+        assert!(encoded.contains("hive_completed_downloads 7"));
+        assert!(encoded.contains("hive_uptime_seconds "));
     }
 
     #[test]

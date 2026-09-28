@@ -1,8 +1,8 @@
 ## Overview
 
 Hive is a compact BitTorrent tracker written in Rust. A shared DashMap-backed
-swarm registry serves HTTP and BEP 15 UDP clients, while SQLite snapshots retain
-peer and completion data across restarts.
+swarm registry serves HTTP and BEP 15 UDP clients. Operators can retain peer,
+completion, and dashboard data in SQLite or run entirely in memory.
 
 The service exposes:
 
@@ -38,10 +38,10 @@ Without `--protocol`, Hive uses `default_protocol` from `hive.toml`. Its default
 value is `both`, so the HTTP and UDP listeners run when neither option is
 configured.
 
-Open `http://localhost:3000` for the dashboard. The default SQLite database is
-created as `hive.db` in the working directory. The dashboard remains available
-when `udp` is selected; in that mode, the read-only HTTP scrape route remains
-available while HTTP announces are disabled.
+Open `http://localhost:3000` for the dashboard. In the default `sqlite` mode,
+the database is created as `hive.db` in the working directory. The dashboard
+remains available when `udp` is selected; in that mode, the read-only HTTP
+scrape route remains available while HTTP announces are disabled.
 
 The single-page dashboard shows peers, seeders, leechers, torrents, completed
 downloads, uptime, and tracker requests from the last completed second. Current
@@ -58,10 +58,10 @@ version and subresource integrity hash, so chart rendering requires access to
 the CDN.
 
 Tracker population totals are maintained incrementally for constant-time
-telemetry updates. Dashboard history is cached in memory until a new snapshot
-is committed, tracker persistence writes only changed torrents, and full HTTP
-scrape responses are cached for up to five seconds with mutation-based
-invalidation.
+telemetry updates. In SQLite mode, dashboard history is cached until a new
+snapshot is committed and tracker persistence writes only changed torrents.
+Full HTTP scrape responses are cached for up to five seconds with
+mutation-based invalidation.
 
 The announce path is designed to stay bounded and in memory:
 
@@ -75,10 +75,9 @@ The announce path is designed to stay bounded and in memory:
 * stale-peer scans run on Tokio's blocking pool so large cleanup passes do not
   occupy asynchronous request workers.
 
-Hive deliberately retains SQLite persistence and IPv6 support rather than
-copying narrower in-memory-only tracker designs. Persistence is incremental and
-outside the announce path, while IPv4 and IPv6 compact peer lists are emitted
-separately.
+Hive supports both a narrow memory-only deployment and durable SQLite
+persistence. Storage work remains outside the announce path, while IPv4 and
+IPv6 compact peer lists are emitted separately.
 
 ## Configuration
 
@@ -90,7 +89,8 @@ Hive reads configuration from `hive.toml` in the working directory.
 | `http_addr` | `0.0.0.0:3000` | Web UI and HTTP tracker listen address |
 | `admin_addr` | Not set | Optional private dashboard, statistics, history, and metrics listen address |
 | `udp_addr` | `0.0.0.0:6969` | UDP tracker listen address |
-| `database_path` | `hive.db` | SQLite database path |
+| `persistence` | `sqlite` | Storage mode: `sqlite` or `memory` |
+| `database_path` | `hive.db` | SQLite database path; unused in memory mode |
 | `announce_interval` | `1800` | Client reannounce interval in seconds |
 | `peer_timeout` | `3600` | Maximum idle peer age in seconds |
 | `persistence_interval` | `30` | Snapshot interval in seconds |
@@ -103,11 +103,38 @@ Hive reads configuration from `hive.toml` in the working directory.
 Use `--config path/to/config.toml` to load another file. The `--protocol`
 command-line argument overrides `default_protocol` for the current process.
 
+Set `persistence = "memory"` for a memory-only tracker. Peer and completion
+state is discarded on restart, while dashboard history remains available for
+the lifetime of the process. The default `sqlite` mode retains tracker state
+and dashboard history across restarts.
+
 The HTTP concurrency limit provides overload protection while retaining
 headroom above the observed throughput optimum near 64 in-flight requests.
 Requests above the configured limit wait until capacity is available. The
 limit applies to all HTTP routes and does not affect the UDP listener. Values
 must be greater than zero.
+
+Hive reads `blacklist.txt` from the same directory as the selected configuration
+file. Each non-empty line contains one exact IPv4 address, IPv6 address, or
+40-character hexadecimal info hash. Lines and trailing content beginning with
+`#` are comments:
+
+```text
+# Blocked torrent
+0123456789abcdef0123456789abcdef01234567
+
+# Blocked clients
+192.0.2.10
+2001:db8::10
+```
+
+Blacklisted clients and torrents receive tracker error responses for HTTP and
+UDP announce and scrape requests. Hive removes matching peers and torrents from
+restored state during startup. While Hive is running, it checks the file every
+five seconds and atomically applies valid changes to both HTTP and UDP. Newly
+blacklisted peers and torrents are removed from active state. If a reload is
+missing or malformed, Hive logs the error and retains the last valid entries;
+a missing or malformed file still prevents startup.
 
 ### Cloudflare Tunnel and trusted reverse proxies
 
@@ -241,6 +268,7 @@ Build the release binary and install the binary, configuration, and unit:
 cargo build --release
 sudo install -Dm755 target/release/hive-tracker /usr/local/bin/hive-tracker
 sudo install -Dm644 hive.toml /etc/hive/hive.toml
+sudo install -Dm644 blacklist.txt /etc/hive/blacklist.txt
 sudo install -Dm644 hive-tracker.service /etc/systemd/system/hive-tracker.service
 ```
 
@@ -285,6 +313,7 @@ docker run --detach `
   --env "HIVE_ENABLE_UDP_SCRAPE=true" `
   --env "HIVE_HTTP_ADDR=0.0.0.0:3000" `
   --env "HIVE_UDP_ADDR=0.0.0.0:6969" `
+  --env "HIVE_PERSISTENCE=sqlite" `
   --env "HIVE_DATABASE_PATH=/data/hive.db" `
   --env "HIVE_ANNOUNCE_INTERVAL=1800" `
   --env "HIVE_PEER_TIMEOUT=3600" `
@@ -305,7 +334,8 @@ Environment variables override values from `/etc/hive/hive.toml`:
 | `HIVE_HTTP_ADDR` | `0.0.0.0:3000` | HTTP listen address inside the container |
 | `HIVE_ADMIN_ADDR` | `0.0.0.0:3001` | Optional private admin listen address; empty keeps the combined listener |
 | `HIVE_UDP_ADDR` | `0.0.0.0:6969` | UDP listen address inside the container |
-| `HIVE_DATABASE_PATH` | `/data/hive.db` | SQLite database path |
+| `HIVE_PERSISTENCE` | `sqlite` | Storage mode: `sqlite` or `memory` |
+| `HIVE_DATABASE_PATH` | `/data/hive.db` | SQLite database path; unused in memory mode |
 | `HIVE_ANNOUNCE_INTERVAL` | `1800` | Client reannounce interval in seconds |
 | `HIVE_PEER_TIMEOUT` | `3600` | Maximum idle peer age in seconds |
 | `HIVE_PERSISTENCE_INTERVAL` | `30` | Persistence interval in seconds |
@@ -333,6 +363,20 @@ Alternatively, use the included Compose configuration:
 docker compose up --detach
 ```
 
+This also starts Prometheus and a provisioned Grafana instance. Open
+`http://localhost:3002/d/hive-stats` for the **Hive Tracker Stats** dashboard
+and sign in with the `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD` values
+from `.env` (both default to `admin` for local use). Change the password before
+making Grafana available beyond localhost. Prometheus is available locally at
+`http://localhost:9090`.
+
+Prometheus retains 30 days of metrics and scrapes Hive every five seconds. The
+dashboard mirrors the built-in stats page and adds request, traffic, result,
+and announce-event panels. Its data source and dashboard are provisioned from
+`monitoring/`. If `HIVE_ADMIN_ADDR` is enabled, update the target in
+`monitoring/prometheus.yml` from `hive:3000` to the configured admin port,
+because `/metrics` moves to the private admin listener.
+
 To enable the private admin listener with Compose, set
 `HIVE_ADMIN_ADDR=0.0.0.0:3001` and expose it only on a trusted interface or to a
 private reverse proxy. For local-only host access, add
@@ -353,8 +397,8 @@ docker inspect --format "{{.State.Health.Status}}" hive
 ```
 
 The default container configuration enables both tracker protocols and both
-scrape endpoints. To customize other settings, mount a configuration file at
-`/etc/hive/hive.toml`:
+scrape endpoints. To customize other settings or the blacklist, mount both
+files under `/etc/hive`:
 
 ```powershell
 docker run --detach --name hive `
@@ -362,6 +406,7 @@ docker run --detach --name hive `
   --publish 6969:6969/udp `
   --volume hive-data:/data `
   --volume "${PWD}/hive.toml:/etc/hive/hive.toml:ro" `
+  --volume "${PWD}/blacklist.txt:/etc/hive/blacklist.txt:ro" `
   prashantkhandelwal/hive:latest
 ```
 

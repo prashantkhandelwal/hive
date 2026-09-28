@@ -87,6 +87,8 @@ async fn run_benchmark(requests: usize, concurrency: usize) -> BenchmarkResult {
     let temporary_directory = TempDir::new().expect("benchmark directory should be created");
     let config_path = temporary_directory.path().join("hive-benchmark.toml");
     let database_path = temporary_directory.path().join("hive-benchmark.db");
+    fs::write(temporary_directory.path().join("blacklist.txt"), "")
+        .expect("benchmark blacklist should be written");
     fs::write(
         &config_path,
         format!(

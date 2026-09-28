@@ -1,7 +1,4 @@
 use std::{
-    borrow::Cow,
-    collections::{BTreeMap, HashMap},
-    io::Write as _,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -21,14 +18,20 @@ use tower::limit::ConcurrencyLimitLayer;
 use tracing::{debug, error};
 
 use crate::{
-    bencode::{decode as decode_bencode, Value as BencodeValue},
     config::{AppConfig, Protocol},
     metrics::AppMetrics,
     persistence::{DashboardHistory, MetricPoint, Persistence},
     rate_limit::RateLimiter,
-    state::{
-        unix_timestamp, AnnounceEvent, InfoHash, Peer, SwarmStats, TrackerState, TrackerSummary,
-    },
+    state::{unix_timestamp, InfoHash, Peer, TrackerState, TrackerSummary},
+};
+
+#[path = "web_protocol.rs"]
+mod protocol;
+
+use protocol::{
+    announce_payload, decode_scrape_payload, first, identifier, optional_number, parse_compact,
+    parse_event, parse_query, required_identifier, required_number, scrape_format, scrape_payload,
+    ScrapeFormat,
 };
 
 #[derive(Clone)]
@@ -99,24 +102,6 @@ struct HistoryQuery {
     period: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ScrapeFormat {
-    Bencode,
-    Json,
-}
-
-#[derive(Debug, Eq, PartialEq, Serialize)]
-struct ScrapeJsonResponse {
-    files: BTreeMap<String, ScrapeJsonStats>,
-}
-
-#[derive(Debug, Eq, PartialEq, Serialize)]
-struct ScrapeJsonStats {
-    complete: u64,
-    downloaded: u64,
-    incomplete: u64,
-}
-
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -124,12 +109,7 @@ struct ApiError {
 }
 
 pub fn router(context: AppContext, enable_http_tracker: bool) -> Router {
-    let mut router = Router::new()
-        .route("/", get(index))
-        .route("/stats", get(statistics))
-        .route("/history", get(history))
-        .route("/metrics", get(metrics))
-        .route("/health", get(health));
+    let mut router = dashboard_routes().route("/health", get(health));
     router = add_tracker_routes(router, &context, enable_http_tracker);
     finish_router(router, context)
 }
@@ -141,12 +121,15 @@ pub fn tracker_router(context: AppContext, enable_http_tracker: bool) -> Router 
 }
 
 pub fn admin_router(context: AppContext) -> Router {
-    let router = Router::new()
+    finish_router(dashboard_routes(), context)
+}
+
+fn dashboard_routes() -> Router<AppContext> {
+    Router::new()
         .route("/", get(index))
         .route("/stats", get(statistics))
         .route("/history", get(history))
-        .route("/metrics", get(metrics));
-    finish_router(router, context)
+        .route("/metrics", get(metrics))
 }
 
 fn add_tracker_routes(
@@ -239,6 +222,7 @@ async fn announce(
     tracker_gate(&context, client_ip)?;
     let params = parse_query(query.as_deref().unwrap_or_default())?;
     let info_hash = required_identifier(&params, "info_hash")?;
+    reject_blacklisted_info_hash(&context, &info_hash, "announce")?;
     let peer_id = required_identifier(&params, "peer_id")?;
     let port = required_number::<u16>(&params, "port")?;
     let _uploaded = required_number::<u64>(&params, "uploaded")?;
@@ -265,7 +249,7 @@ async fn announce(
     let (stats, peers) = context
         .state
         .announce_with_peers(info_hash, peer, event, numwant);
-    context.metrics.announce("http", event_name(event));
+    context.metrics.announce("http", event.as_str());
     update_population(&context);
     context.metrics.request("http", "announce", "ok");
     Ok(bencoded_response(announce_payload(
@@ -298,6 +282,13 @@ async fn scrape(
                 .iter()
                 .map(|value| identifier(value, "info_hash"))
                 .collect::<Result<Vec<_>, _>>()?;
+            if hashes
+                .iter()
+                .any(|info_hash| context.config.blacklist.contains_info_hash(info_hash))
+            {
+                context.metrics.request("http", "scrape", "blacklisted");
+                return Err(ApiError::forbidden("torrent is blacklisted"));
+            }
             Bytes::from(scrape_payload(&context.state, hashes))
         }
         None => {
@@ -402,7 +393,11 @@ async fn health(State(context): State<AppContext>) -> (StatusCode, Json<HealthRe
             StatusCode::OK,
             Json(HealthResponse {
                 status: "ok",
-                database: "ok",
+                database: if context.persistence.is_memory() {
+                    "disabled"
+                } else {
+                    "ok"
+                },
             }),
         )
     } else {
@@ -417,12 +412,28 @@ async fn health(State(context): State<AppContext>) -> (StatusCode, Json<HealthRe
 }
 
 fn tracker_gate(context: &AppContext, ip: IpAddr) -> Result<(), ApiError> {
+    if context.config.blacklist.contains_ip(&ip) {
+        context.metrics.request("http", "tracker", "blacklisted");
+        return Err(ApiError::forbidden("client IP is blacklisted"));
+    }
     if !context.rate_limiter.check(ip) {
         context.metrics.request("http", "tracker", "rate_limited");
         return Err(ApiError {
             status: StatusCode::TOO_MANY_REQUESTS,
             message: "rate limit exceeded".into(),
         });
+    }
+    Ok(())
+}
+
+fn reject_blacklisted_info_hash(
+    context: &AppContext,
+    info_hash: &InfoHash,
+    endpoint: &'static str,
+) -> Result<(), ApiError> {
+    if context.config.blacklist.contains_info_hash(info_hash) {
+        context.metrics.request("http", endpoint, "blacklisted");
+        return Err(ApiError::forbidden("torrent is blacklisted"));
     }
     Ok(())
 }
@@ -454,303 +465,14 @@ fn resolve_client_ip(
 }
 
 fn update_population(context: &AppContext) {
-    context
-        .metrics
-        .set_population(context.state.peer_count(), context.state.swarm_count());
-}
-
-type QueryParams<'a> = HashMap<Cow<'a, str>, Vec<Cow<'a, [u8]>>>;
-
-fn parse_query(query: &str) -> Result<QueryParams<'_>, ApiError> {
-    let mut params = HashMap::new();
-    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = match percent_decode(key)? {
-            Cow::Borrowed(_) => Cow::Borrowed(key),
-            Cow::Owned(key) => Cow::Owned(
-                String::from_utf8(key)
-                    .map_err(|_| ApiError::bad_request("query key is not valid UTF-8"))?,
-            ),
-        };
-        params
-            .entry(key)
-            .or_insert_with(Vec::new)
-            .push(percent_decode(value)?);
-    }
-    Ok(params)
-}
-
-fn percent_decode(value: &str) -> Result<Cow<'_, [u8]>, ApiError> {
-    let bytes = value.as_bytes();
-    if !bytes.iter().any(|byte| matches!(byte, b'%' | b'+')) {
-        return Ok(Cow::Borrowed(bytes));
-    }
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' if index + 2 < bytes.len() => {
-                let high = hex_digit(bytes[index + 1])?;
-                let low = hex_digit(bytes[index + 2])?;
-                decoded.push((high << 4) | low);
-                index += 3;
-            }
-            b'%' => return Err(ApiError::bad_request("incomplete percent escape")),
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    Ok(Cow::Owned(decoded))
-}
-
-fn hex_digit(value: u8) -> Result<u8, ApiError> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(value - b'a' + 10),
-        b'A'..=b'F' => Ok(value - b'A' + 10),
-        _ => Err(ApiError::bad_request("invalid percent escape")),
-    }
-}
-
-fn required_identifier(params: &QueryParams<'_>, name: &'static str) -> Result<[u8; 20], ApiError> {
-    identifier(
-        first(params, name).ok_or_else(|| ApiError::bad_request(format!("missing {name}")))?,
-        name,
-    )
-}
-
-fn identifier(value: &[u8], name: &'static str) -> Result<[u8; 20], ApiError> {
-    let length = value.len();
-    value
-        .try_into()
-        .map_err(|_| ApiError::bad_request(format!("{name} must be 20 bytes, got {length}")))
-}
-
-fn required_number<T>(params: &QueryParams<'_>, name: &'static str) -> Result<T, ApiError>
-where
-    T: std::str::FromStr,
-{
-    optional_number(params, name)?.ok_or_else(|| ApiError::bad_request(format!("missing {name}")))
-}
-
-fn optional_number<T>(params: &QueryParams<'_>, name: &'static str) -> Result<Option<T>, ApiError>
-where
-    T: std::str::FromStr,
-{
-    let Some(value) = first(params, name) else {
-        return Ok(None);
-    };
-    let text =
-        std::str::from_utf8(value).map_err(|_| ApiError::bad_request(format!("invalid {name}")))?;
-    text.parse()
-        .map(Some)
-        .map_err(|_| ApiError::bad_request(format!("invalid {name}")))
-}
-
-fn first<'a>(params: &'a QueryParams<'_>, name: &str) -> Option<&'a [u8]> {
-    params
-        .get(name)
-        .and_then(|values| values.first())
-        .map(AsRef::as_ref)
-}
-
-fn parse_event(value: Option<&[u8]>) -> Result<AnnounceEvent, ApiError> {
-    match value {
-        None | Some(b"") => Ok(AnnounceEvent::Update),
-        Some(b"started") => Ok(AnnounceEvent::Started),
-        Some(b"completed") => Ok(AnnounceEvent::Completed),
-        Some(b"stopped") => Ok(AnnounceEvent::Stopped),
-        _ => Err(ApiError::bad_request("invalid event")),
-    }
-}
-
-fn parse_compact(value: Option<&[u8]>) -> Result<bool, ApiError> {
-    match value {
-        None | Some(b"1") => Ok(true),
-        Some(b"0") => Ok(false),
-        _ => Err(ApiError::bad_request("compact must be 0 or 1")),
-    }
-}
-
-fn event_name(event: AnnounceEvent) -> &'static str {
-    match event {
-        AnnounceEvent::Started => "started",
-        AnnounceEvent::Completed => "completed",
-        AnnounceEvent::Stopped => "stopped",
-        AnnounceEvent::Update => "update",
-    }
-}
-
-fn announce_payload(
-    stats: SwarmStats,
-    peers: Vec<Peer>,
-    requester: IpAddr,
-    interval: u32,
-    compact: bool,
-) -> Vec<u8> {
-    let mut output = format!(
-        "d8:completei{}e10:incompletei{}e8:intervali{}e5:peers",
-        stats.complete, stats.incomplete, interval
-    )
-    .into_bytes();
-    if compact {
-        let (peers, peers6) = compact_peers(peers);
-        append_bencoded_bytes(&mut output, &peers);
-        if !peers6.is_empty() {
-            output.extend_from_slice(b"6:peers6");
-            append_bencoded_bytes(&mut output, &peers6);
-        }
-    } else {
-        append_peer_list(&mut output, peers, requester);
-    }
-    output.push(b'e');
-    output
-}
-
-fn scrape_payload(state: &TrackerState, mut hashes: Vec<InfoHash>) -> Vec<u8> {
-    hashes.sort_unstable();
-    let mut output = b"d5:filesd".to_vec();
-    for info_hash in hashes {
-        let stats = state.stats(&info_hash);
-        output.extend_from_slice(b"20:");
-        output.extend_from_slice(&info_hash);
-        write!(
-            output,
-            "d8:completei{}e10:downloadedi{}e10:incompletei{}ee",
-            stats.complete, stats.downloaded, stats.incomplete
-        )
-        .expect("writing to a Vec cannot fail");
-    }
-    output.extend_from_slice(b"ee");
-    output
-}
-
-fn scrape_format(value: Option<&[u8]>) -> Result<ScrapeFormat, ApiError> {
-    match value {
-        None | Some(b"") | Some(b"bencode") => Ok(ScrapeFormat::Bencode),
-        Some(b"json") => Ok(ScrapeFormat::Json),
-        _ => Err(ApiError::bad_request("format must be bencode or json")),
-    }
-}
-
-fn decode_scrape_payload(payload: &[u8]) -> Result<ScrapeJsonResponse, String> {
-    let BencodeValue::Dictionary(root) =
-        decode_bencode(payload).map_err(|error| error.to_string())?
-    else {
-        return Err("root value is not a dictionary".into());
-    };
-    let files = root
-        .iter()
-        .find(|(key, _)| *key == b"files")
-        .map(|(_, value)| value)
-        .ok_or_else(|| "missing files dictionary".to_owned())?;
-    let BencodeValue::Dictionary(files) = files else {
-        return Err("files value is not a dictionary".into());
-    };
-
-    let mut decoded = BTreeMap::new();
-    for (info_hash, stats) in files {
-        if info_hash.len() != 20 {
-            return Err(format!(
-                "info hash must be 20 bytes, got {}",
-                info_hash.len()
-            ));
-        }
-        let BencodeValue::Dictionary(stats) = stats else {
-            return Err("torrent statistics value is not a dictionary".into());
-        };
-        decoded.insert(
-            hex_string(info_hash),
-            ScrapeJsonStats {
-                complete: scrape_integer(stats, b"complete")?,
-                downloaded: scrape_integer(stats, b"downloaded")?,
-                incomplete: scrape_integer(stats, b"incomplete")?,
-            },
-        );
-    }
-    Ok(ScrapeJsonResponse { files: decoded })
-}
-
-fn scrape_integer(entries: &[(&[u8], BencodeValue<'_>)], key: &[u8]) -> Result<u64, String> {
-    let value = entries
-        .iter()
-        .find(|(entry_key, _)| *entry_key == key)
-        .map(|(_, value)| value)
-        .ok_or_else(|| format!("missing {} value", String::from_utf8_lossy(key)))?;
-    let BencodeValue::Integer(value) = value else {
-        return Err(format!(
-            "{} value is not an integer",
-            String::from_utf8_lossy(key)
-        ));
-    };
-    u64::try_from(*value).map_err(|_| {
-        format!(
-            "{} value is negative or too large",
-            String::from_utf8_lossy(key)
-        )
-    })
-}
-
-fn hex_string(value: &[u8]) -> String {
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-
-    let mut encoded = String::with_capacity(value.len() * 2);
-    for byte in value {
-        encoded.push(HEX_DIGITS[(byte >> 4) as usize] as char);
-        encoded.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    encoded
-}
-
-fn compact_peers(peers: Vec<Peer>) -> (Vec<u8>, Vec<u8>) {
-    let mut peers4 = Vec::new();
-    let mut peers6 = Vec::new();
-    for peer in peers {
-        match peer.ip {
-            IpAddr::V4(ip) => {
-                peers4.extend_from_slice(&ip.octets());
-                peers4.extend_from_slice(&peer.port.to_be_bytes());
-            }
-            IpAddr::V6(ip) => {
-                peers6.extend_from_slice(&ip.octets());
-                peers6.extend_from_slice(&peer.port.to_be_bytes());
-            }
-        }
-    }
-    (peers4, peers6)
-}
-
-fn append_peer_list(output: &mut Vec<u8>, peers: Vec<Peer>, requester: IpAddr) {
-    output.push(b'l');
-    for peer in peers {
-        if !same_address_family(requester, peer.ip) {
-            continue;
-        }
-        output.extend_from_slice(b"d2:ip");
-        append_bencoded_bytes(output, peer.ip.to_string().as_bytes());
-        output.extend_from_slice(b"7:peer id20:");
-        output.extend_from_slice(&peer.peer_id);
-        write!(output, "4:porti{}ee", peer.port).expect("writing to a Vec cannot fail");
-    }
-    output.push(b'e');
-}
-
-fn append_bencoded_bytes(output: &mut Vec<u8>, value: &[u8]) {
-    write!(output, "{}:", value.len()).expect("writing to a Vec cannot fail");
-    output.extend_from_slice(value);
-}
-
-fn same_address_family(left: IpAddr, right: IpAddr) -> bool {
-    matches!(
-        (left, right),
-        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
-    )
+    let summary = context.state.summary();
+    context.metrics.set_population(
+        summary.peers,
+        summary.seeders,
+        summary.leechers,
+        summary.torrents,
+        summary.completed,
+    );
 }
 
 fn bencoded_response(body: impl Into<Body>) -> Response {
@@ -773,6 +495,13 @@ impl ApiError {
     fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: message.into(),
         }
     }
@@ -800,7 +529,11 @@ const INDEX_HTML: &str = include_str!(concat!(
 ));
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
+    use super::protocol::{percent_decode, ScrapeJsonStats};
     use super::*;
+    use crate::state::{AnnounceEvent, SwarmStats};
 
     #[test]
     fn given_statistics_response_when_serialized_then_history_is_omitted() {

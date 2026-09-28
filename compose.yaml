@@ -13,6 +13,7 @@ services:
       HIVE_HTTP_ADDR: 0.0.0.0:3000
       HIVE_ADMIN_ADDR: ${HIVE_ADMIN_ADDR:-}
       HIVE_UDP_ADDR: 0.0.0.0:6969
+      HIVE_PERSISTENCE: ${HIVE_PERSISTENCE:-sqlite}
       HIVE_DATABASE_PATH: /data/hive.db
       HIVE_ANNOUNCE_INTERVAL: ${HIVE_ANNOUNCE_INTERVAL:-1800}
       HIVE_PEER_TIMEOUT: ${HIVE_PEER_TIMEOUT:-3600}
@@ -28,5 +29,38 @@ services:
     volumes:
       - hive-data:/data
 
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    restart: unless-stopped
+    depends_on:
+      - hive
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:12.2.0
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3002:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
 volumes:
   hive-data:
+  prometheus-data:
+  grafana-data:

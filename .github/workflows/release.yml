@@ -75,13 +75,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist/package | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/package/
-          Copy-Item README.md, hive.toml dist/package/
+          Copy-Item README.md, hive.toml, blacklist.txt dist/package/
           Compress-Archive -Path dist/package/* -DestinationPath "dist/${{ matrix.archive }}"
       - name: Package Unix binary
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist/package
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" README.md hive.toml dist/package/
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" README.md hive.toml blacklist.txt dist/package/
           tar -czf "dist/${{ matrix.archive }}" -C dist/package .
       - name: Upload release archive
         uses: actions/upload-artifact@v4
