@@ -4,7 +4,6 @@ use std::{
     path::Path,
     str::FromStr,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
