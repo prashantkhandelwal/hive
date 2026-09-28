@@ -114,6 +114,28 @@ Requests above the configured limit wait until capacity is available. The
 limit applies to all HTTP routes and does not affect the UDP listener. Values
 must be greater than zero.
 
+Hive reads `blacklist.txt` from the same directory as the selected configuration
+file. Each non-empty line contains one exact IPv4 address, IPv6 address, or
+40-character hexadecimal info hash. Lines and trailing content beginning with
+`#` are comments:
+
+```text
+# Blocked torrent
+0123456789abcdef0123456789abcdef01234567
+
+# Blocked clients
+192.0.2.10
+2001:db8::10
+```
+
+Blacklisted clients and torrents receive tracker error responses for HTTP and
+UDP announce and scrape requests. Hive removes matching peers and torrents from
+restored state during startup. While Hive is running, it checks the file every
+five seconds and atomically applies valid changes to both HTTP and UDP. Newly
+blacklisted peers and torrents are removed from active state. If a reload is
+missing or malformed, Hive logs the error and retains the last valid entries;
+a missing or malformed file still prevents startup.
+
 ### Cloudflare Tunnel and trusted reverse proxies
 
 Hive uses the direct connection address for HTTP rate limiting and peer
@@ -246,6 +268,7 @@ Build the release binary and install the binary, configuration, and unit:
 cargo build --release
 sudo install -Dm755 target/release/hive-tracker /usr/local/bin/hive-tracker
 sudo install -Dm644 hive.toml /etc/hive/hive.toml
+sudo install -Dm644 blacklist.txt /etc/hive/blacklist.txt
 sudo install -Dm644 hive-tracker.service /etc/systemd/system/hive-tracker.service
 ```
 
@@ -374,8 +397,8 @@ docker inspect --format "{{.State.Health.Status}}" hive
 ```
 
 The default container configuration enables both tracker protocols and both
-scrape endpoints. To customize other settings, mount a configuration file at
-`/etc/hive/hive.toml`:
+scrape endpoints. To customize other settings or the blacklist, mount both
+files under `/etc/hive`:
 
 ```powershell
 docker run --detach --name hive `
@@ -383,6 +406,7 @@ docker run --detach --name hive `
   --publish 6969:6969/udp `
   --volume hive-data:/data `
   --volume "${PWD}/hive.toml:/etc/hive/hive.toml:ro" `
+  --volume "${PWD}/blacklist.txt:/etc/hive/blacklist.txt:ro" `
   prashantkhandelwal/hive:latest
 ```
 

@@ -22,7 +22,7 @@ use crate::{
     metrics::AppMetrics,
     persistence::{DashboardHistory, MetricPoint, Persistence},
     rate_limit::RateLimiter,
-    state::{unix_timestamp, Peer, TrackerState, TrackerSummary},
+    state::{unix_timestamp, InfoHash, Peer, TrackerState, TrackerSummary},
 };
 
 #[path = "web_protocol.rs"]
@@ -222,6 +222,7 @@ async fn announce(
     tracker_gate(&context, client_ip)?;
     let params = parse_query(query.as_deref().unwrap_or_default())?;
     let info_hash = required_identifier(&params, "info_hash")?;
+    reject_blacklisted_info_hash(&context, &info_hash, "announce")?;
     let peer_id = required_identifier(&params, "peer_id")?;
     let port = required_number::<u16>(&params, "port")?;
     let _uploaded = required_number::<u64>(&params, "uploaded")?;
@@ -275,6 +276,13 @@ async fn scrape(
                 .iter()
                 .map(|value| identifier(value, "info_hash"))
                 .collect::<Result<Vec<_>, _>>()?;
+            if hashes
+                .iter()
+                .any(|info_hash| context.config.blacklist.contains_info_hash(info_hash))
+            {
+                context.metrics.request("http", "scrape", "blacklisted");
+                return Err(ApiError::forbidden("torrent is blacklisted"));
+            }
             Bytes::from(scrape_payload(&context.state, hashes))
         }
         None => {
@@ -398,12 +406,28 @@ async fn health(State(context): State<AppContext>) -> (StatusCode, Json<HealthRe
 }
 
 fn tracker_gate(context: &AppContext, ip: IpAddr) -> Result<(), ApiError> {
+    if context.config.blacklist.contains_ip(&ip) {
+        context.metrics.request("http", "tracker", "blacklisted");
+        return Err(ApiError::forbidden("client IP is blacklisted"));
+    }
     if !context.rate_limiter.check(ip) {
         context.metrics.request("http", "tracker", "rate_limited");
         return Err(ApiError {
             status: StatusCode::TOO_MANY_REQUESTS,
             message: "rate limit exceeded".into(),
         });
+    }
+    Ok(())
+}
+
+fn reject_blacklisted_info_hash(
+    context: &AppContext,
+    info_hash: &InfoHash,
+    endpoint: &'static str,
+) -> Result<(), ApiError> {
+    if context.config.blacklist.contains_info_hash(info_hash) {
+        context.metrics.request("http", endpoint, "blacklisted");
+        return Err(ApiError::forbidden("torrent is blacklisted"));
     }
     Ok(())
 }
@@ -465,6 +489,13 @@ impl ApiError {
     fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: message.into(),
         }
     }
