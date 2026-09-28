@@ -22,7 +22,7 @@ use crate::{
     metrics::AppMetrics,
     persistence::{DashboardHistory, MetricPoint, Persistence},
     rate_limit::RateLimiter,
-    state::{unix_timestamp, Peer, TrackerState, TrackerSummary},
+    state::{unix_timestamp, InfoHash, Peer, TrackerState, TrackerSummary},
 };
 
 #[path = "web_protocol.rs"]

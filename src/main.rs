@@ -248,7 +248,14 @@ async fn reload_blacklist(
         .await;
         match result {
             Ok(Ok(Some((info_hashes, ips)))) => {
-                metrics.set_population(state.peer_count(), state.swarm_count());
+                let summary = state.summary();
+                metrics.set_population(
+                    summary.peers,
+                    summary.seeders,
+                    summary.leechers,
+                    summary.torrents,
+                    summary.completed,
+                );
                 info!(
                     path = %path.display(),
                     blacklisted_info_hashes = info_hashes,
