@@ -135,6 +135,7 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
         metrics.clone(),
     ));
+    let traffic_sampler_task = tokio::spawn(sample_traffic(metrics.clone()));
     let traffic_log_task = tokio::spawn(log_traffic(metrics.clone()));
     info!(
         ?protocol,
@@ -152,7 +153,9 @@ async fn main() -> Result<()> {
 
     persistence_task.abort();
     blacklist_task.abort();
+    traffic_sampler_task.abort();
     traffic_log_task.abort();
+    metrics.sample_traffic();
     persistence.save(&state).await?;
     persistence.flush_client_announces().await?;
     persistence
@@ -221,6 +224,15 @@ async fn log_traffic(metrics: AppMetrics) {
             udp_egress_bytes_per_minute = traffic.udp.egress_bytes,
             "traffic summary"
         );
+    }
+}
+
+async fn sample_traffic(metrics: AppMetrics) {
+    let mut ticker = time::interval(std::time::Duration::from_secs(1));
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        metrics.sample_traffic();
     }
 }
 
