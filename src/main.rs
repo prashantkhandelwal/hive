@@ -154,6 +154,7 @@ async fn main() -> Result<()> {
     blacklist_task.abort();
     traffic_log_task.abort();
     persistence.save(&state).await?;
+    persistence.flush_client_announces().await?;
     persistence
         .record_dashboard_snapshot(
             state.summary(),
@@ -404,24 +405,34 @@ async fn periodic_maintenance(
             error!(%error, "tracker cleanup task failed");
             continue;
         }
-        if let Err(error) = persistence.save(&state).await {
-            error!(%error, "failed to persist tracker state");
-        } else if let Err(error) = persistence
-            .record_dashboard_snapshot(
-                state.summary(),
-                started_at.elapsed().as_secs(),
-                metrics.traffic_snapshot(),
-            )
-            .await
-        {
-            error!(%error, "failed to persist dashboard metrics");
-        } else {
-            debug!(
-                peers = state.peer_count(),
-                removed_peers = peers_before.saturating_sub(state.peer_count()),
-                swarms = state.swarm_count(),
-                "periodic maintenance completed"
-            );
+        let state_saved = match persistence.save(&state).await {
+            Ok(()) => true,
+            Err(error) => {
+                error!(%error, "failed to persist tracker state");
+                false
+            }
+        };
+        if let Err(error) = persistence.flush_client_announces().await {
+            error!(%error, "failed to persist client statistics");
+        }
+        if state_saved {
+            if let Err(error) = persistence
+                .record_dashboard_snapshot(
+                    state.summary(),
+                    started_at.elapsed().as_secs(),
+                    metrics.traffic_snapshot(),
+                )
+                .await
+            {
+                error!(%error, "failed to persist dashboard metrics");
+            } else {
+                debug!(
+                    peers = state.peer_count(),
+                    removed_peers = peers_before.saturating_sub(state.peer_count()),
+                    swarms = state.swarm_count(),
+                    "periodic maintenance completed"
+                );
+            }
         }
     }
 }

@@ -7,7 +7,7 @@ use std::{
 };
 
 use tokio::{net::UdpSocket, sync::watch};
-use tracing::{debug, error};
+use tracing::debug;
 
 use crate::{
     blacklist::Blacklist,
@@ -157,12 +157,7 @@ impl UdpTracker {
         if port == 0 {
             return error_response(transaction_id, "invalid peer port");
         }
-        let client_persistence = self.persistence.clone();
-        tokio::spawn(async move {
-            if let Err(error) = client_persistence.record_client_announce(peer_id).await {
-                error!(%error, "failed to persist UDP announce client");
-            }
-        });
+        self.persistence.record_client_announce(peer_id);
         let peer = Peer {
             peer_id,
             ip: remote.ip(),
