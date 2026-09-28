@@ -4,6 +4,7 @@ http_addr = "0.0.0.0:3000"
 # /metrics off the public HTTP listener.
 admin_addr = "127.0.0.1:6869"
 udp_addr = "0.0.0.0:6969"
+persistence = "sqlite"
 database_path = "hive.db"
 announce_interval = 1800
 peer_timeout = 3600

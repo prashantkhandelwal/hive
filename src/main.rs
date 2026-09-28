@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 use anyhow::{ensure, Context, Result};
 use clap::Parser;
 use hive_tracker::{
-    config::{AppConfig, Protocol},
+    config::{AppConfig, PersistenceMode, Protocol},
     metrics::AppMetrics,
     persistence::Persistence,
     rate_limit::RateLimiter,
@@ -49,7 +49,10 @@ async fn main() -> Result<()> {
 
     let protocol = resolve_protocol(cli.protocol, config.default_protocol);
     let state = Arc::new(TrackerState::default());
-    let persistence = Persistence::open(&config.database_path).await?;
+    let persistence = match config.persistence {
+        PersistenceMode::Sqlite => Persistence::open(&config.database_path).await?,
+        PersistenceMode::Memory => Persistence::memory(),
+    };
     persistence.load(&state).await?;
     state.remove_stale(config.peer_timeout);
     let metrics = AppMetrics::new()?;
@@ -118,6 +121,7 @@ async fn main() -> Result<()> {
     let traffic_log_task = tokio::spawn(log_traffic(metrics.clone()));
     info!(
         ?protocol,
+        persistence = ?config.persistence,
         web_addr = %config.http_addr,
         admin_addr = ?config.admin_addr,
         udp_addr = %config.udp_addr,
