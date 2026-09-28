@@ -1,3 +1,5 @@
+# Hive
+
 ## Overview
 
 Hive is a compact BitTorrent tracker written in Rust. A shared DashMap-backed
@@ -18,30 +20,157 @@ The service exposes:
 Both listeners accept IPv6 addresses. Binding to `[::]` also accepts IPv4 on
 platforms where dual-stack sockets are enabled.
 
-## Run Locally
+## Installation
 
-Install the Rust toolchain and the platform linker, then run:
+Choose one of the following installation methods.
+
+### Prebuilt release
+
+Release archives for Linux (`x86_64`, `aarch64`, and ARMv7) and Windows
+(`x86_64`) are available from the
+[GitHub Releases](https://github.com/prashantkhandelwal/hive/releases) page.
+Download the archive for your platform and `SHA256SUMS.txt`, verify the
+archive's checksum, and extract it. Each archive contains:
+
+* the `hive-tracker` executable (`hive-tracker.exe` on Windows);
+* `hive.toml`;
+* `blacklist.txt`; and
+* this README.
+
+Keep `hive.toml` and `blacklist.txt` in the same directory. On Linux, make the
+binary executable and start it with:
+
+```bash
+chmod +x hive-tracker
+./hive-tracker --config ./hive.toml
+```
+
+On Windows PowerShell:
 
 ```powershell
-cargo run --release
+.\hive-tracker.exe --config .\hive.toml
+```
+
+### Docker Compose
+
+Install Docker Engine (or Docker Desktop) with Compose v2, clone the
+repository, and create the local environment file:
+
+```powershell
+git clone https://github.com/prashantkhandelwal/hive.git
+Set-Location hive
+Copy-Item .env.example .env
+docker compose up --detach
+docker compose ps
+```
+
+On Linux, use `cp .env.example .env` instead of `Copy-Item`. Review `.env`
+before startup and change `GRAFANA_ADMIN_PASSWORD` from its local-development
+default. Compose starts Hive, Prometheus, and Grafana; the Hive HTTP listener
+is available on `http://127.0.0.1:3000`. See the [Docker](#docker) section for
+standalone container commands, ports, storage, monitoring URLs, and private
+admin-listener guidance.
+
+### Build from source
+
+Install these prerequisites:
+
+* [Git](https://git-scm.com/downloads);
+* the stable Rust toolchain from [rustup](https://rustup.rs/); and
+* a native C linker: Visual Studio Build Tools with the **Desktop development
+  with C++** workload on Windows, or a package such as `build-essential` on
+  Debian/Ubuntu.
+
+Clone the repository and build the locked dependency set:
+
+```powershell
+git clone https://github.com/prashantkhandelwal/hive.git
+Set-Location hive
+rustup default stable
+cargo build --locked --release
+```
+
+The Windows executable is `target\release\hive-tracker.exe`; on Linux it is
+`target/release/hive-tracker`. Run it from the repository root so the supplied
+configuration and blacklist are found:
+
+```powershell
+.\target\release\hive-tracker.exe --config .\hive.toml
+```
+
+On Linux:
+
+```bash
+./target/release/hive-tracker --config ./hive.toml
+```
+
+### Configure before first start
+
+Review `hive.toml` before exposing Hive to a network. The checked-in sample is
+configured for an HTTP tracker behind a same-host Cloudflare Tunnel:
+
+* `default_protocol = "http"`;
+* public tracker and health routes listen on TCP port `3000`;
+* dashboard and administrative routes listen on `127.0.0.1:6869`; and
+* loopback addresses are trusted to supply `CF-Connecting-IP`.
+
+For a direct deployment without a trusted reverse proxy, set:
+
+```toml
+trusted_proxy_cidrs = []
+```
+
+Remove the `admin_addr` line to serve the dashboard on `http_addr`, or set it
+to a private address that operators can reach. Set `default_protocol = "both"`
+if both HTTP and UDP tracker listeners are required.
+
+Hive requires `blacklist.txt` beside the selected configuration file, even
+when the file contains only comments. The supplied empty blacklist is valid.
+In SQLite mode, the process must also be able to write to the directory
+containing `database_path`.
+
+If a firewall is enabled, allow TCP port `3000` for HTTP tracker traffic and
+UDP port `6969` when the UDP tracker is enabled. Keep `admin_addr` private.
+
+## Run Locally
+
+For development, run Hive directly through Cargo:
+
+```powershell
+cargo run --release --locked
 ```
 
 Select the tracker protocol with `--protocol`, or use `both` explicitly:
 
 ```powershell
-cargo run --release -- --protocol http
-cargo run --release -- --protocol udp
-cargo run --release -- --protocol both
+cargo run --release --locked -- --protocol http
+cargo run --release --locked -- --protocol udp
+cargo run --release --locked -- --protocol both
 ```
 
 Without `--protocol`, Hive uses `default_protocol` from `hive.toml`. Its default
-value is `both`, so the HTTP and UDP listeners run when neither option is
-configured.
+when omitted from a configuration file is `both`; the supplied `hive.toml`
+explicitly selects `http`.
 
-Open `http://localhost:3000` for the dashboard. In the default `sqlite` mode,
-the database is created as `hive.db` in the working directory. The dashboard
-remains available when `udp` is selected; in that mode, the read-only HTTP
-scrape route remains available while HTTP announces are disabled.
+With the supplied configuration, open `http://127.0.0.1:6869` for the
+dashboard and `http://127.0.0.1:3000/health` for the health check. If
+`admin_addr` is removed, the dashboard is served from
+`http://127.0.0.1:3000`. In the default `sqlite` persistence mode, the database
+is created as `hive.db` in the working directory. The dashboard remains
+available when `udp` is selected; in that mode, the read-only HTTP scrape route
+remains available while HTTP announces are disabled.
+
+Verify a running instance from PowerShell:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:3000/health
+```
+
+Or from Linux:
+
+```bash
+curl --fail http://127.0.0.1:3000/health
+```
 
 The single-page dashboard shows peers, seeders, leechers, torrents, completed
 downloads, uptime, and tracker requests from the last completed second. Current
@@ -81,11 +210,17 @@ IPv6 compact peer lists are emitted separately.
 
 ## Configuration
 
-Hive reads configuration from `hive.toml` in the working directory.
+Hive reads `hive.toml` in the working directory unless `--config` selects
+another path. It also loads `blacklist.txt` from the selected configuration
+file's directory. The table below lists the built-in values used when settings
+are omitted; the supplied configuration file intentionally overrides some of
+them.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `default_protocol` | `both` | Listener mode: `http`, `udp`, or `both` |
+| `enable_http_scrape` | `true` | Enable the HTTP `/scrape` endpoint |
+| `enable_udp_scrape` | `true` | Enable the UDP scrape action |
 | `http_addr` | `0.0.0.0:3000` | Web UI and HTTP tracker listen address |
 | `admin_addr` | Not set | Optional private dashboard, statistics, history, and metrics listen address |
 | `udp_addr` | `0.0.0.0:6969` | UDP tracker listen address |
@@ -341,6 +476,8 @@ Environment variables override values from `/etc/hive/hive.toml`:
 | `HIVE_PERSISTENCE_INTERVAL` | `30` | Persistence interval in seconds |
 | `HIVE_RATE_LIMIT_PER_MINUTE` | `120` | Per-source-IP request allowance |
 | `HIVE_MAX_CONCURRENT_HTTP_REQUESTS` | `128` | Maximum HTTP requests processed concurrently |
+| `HIVE_TRUSTED_PROXY_CIDRS` | Empty | Comma-separated proxy networks trusted to provide the client IP header |
+| `HIVE_CLIENT_IP_HEADER` | `cf-connecting-ip` | Client IP header accepted from trusted proxies |
 | `HIVE_LOG_FILTER` | `hive_tracker=info` | Tracing filter |
 
 To keep reusable container settings outside shell history, copy `.env.example`
