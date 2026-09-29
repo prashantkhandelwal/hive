@@ -135,6 +135,7 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
         metrics.clone(),
     ));
+    let traffic_sampler_task = tokio::spawn(sample_traffic(metrics.clone()));
     let traffic_log_task = tokio::spawn(log_traffic(metrics.clone()));
     info!(
         ?protocol,
@@ -152,8 +153,11 @@ async fn main() -> Result<()> {
 
     persistence_task.abort();
     blacklist_task.abort();
+    traffic_sampler_task.abort();
     traffic_log_task.abort();
+    metrics.sample_traffic();
     persistence.save(&state).await?;
+    persistence.flush_client_announces().await?;
     persistence
         .record_dashboard_snapshot(
             state.summary(),
@@ -220,6 +224,15 @@ async fn log_traffic(metrics: AppMetrics) {
             udp_egress_bytes_per_minute = traffic.udp.egress_bytes,
             "traffic summary"
         );
+    }
+}
+
+async fn sample_traffic(metrics: AppMetrics) {
+    let mut ticker = time::interval(std::time::Duration::from_secs(1));
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        metrics.sample_traffic();
     }
 }
 
@@ -404,24 +417,34 @@ async fn periodic_maintenance(
             error!(%error, "tracker cleanup task failed");
             continue;
         }
-        if let Err(error) = persistence.save(&state).await {
-            error!(%error, "failed to persist tracker state");
-        } else if let Err(error) = persistence
-            .record_dashboard_snapshot(
-                state.summary(),
-                started_at.elapsed().as_secs(),
-                metrics.traffic_snapshot(),
-            )
-            .await
-        {
-            error!(%error, "failed to persist dashboard metrics");
-        } else {
-            debug!(
-                peers = state.peer_count(),
-                removed_peers = peers_before.saturating_sub(state.peer_count()),
-                swarms = state.swarm_count(),
-                "periodic maintenance completed"
-            );
+        let state_saved = match persistence.save(&state).await {
+            Ok(()) => true,
+            Err(error) => {
+                error!(%error, "failed to persist tracker state");
+                false
+            }
+        };
+        if let Err(error) = persistence.flush_client_announces().await {
+            error!(%error, "failed to persist client statistics");
+        }
+        if state_saved {
+            if let Err(error) = persistence
+                .record_dashboard_snapshot(
+                    state.summary(),
+                    started_at.elapsed().as_secs(),
+                    metrics.traffic_snapshot(),
+                )
+                .await
+            {
+                error!(%error, "failed to persist dashboard metrics");
+            } else {
+                debug!(
+                    peers = state.peer_count(),
+                    removed_peers = peers_before.saturating_sub(state.peer_count()),
+                    swarms = state.swarm_count(),
+                    "periodic maintenance completed"
+                );
+            }
         }
     }
 }

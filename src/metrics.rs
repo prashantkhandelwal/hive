@@ -1,6 +1,9 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
 };
 
 use prometheus::{
@@ -45,6 +48,44 @@ struct TrafficBucket {
     ingress_bytes: u64,
     egress_bytes: u64,
     requests: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TrafficSample {
+    ingress_bytes: u64,
+    egress_bytes: u64,
+    requests: u64,
+}
+
+#[derive(Default)]
+struct AtomicTraffic {
+    ingress_bytes: AtomicU64,
+    egress_bytes: AtomicU64,
+    requests: AtomicU64,
+}
+
+impl AtomicTraffic {
+    fn add(&self, ingress_bytes: u64, egress_bytes: u64) {
+        saturating_add(&self.ingress_bytes, ingress_bytes);
+        saturating_add(&self.egress_bytes, egress_bytes);
+        saturating_add(&self.requests, 1);
+    }
+
+    fn load(&self) -> TrafficSample {
+        TrafficSample {
+            ingress_bytes: self.ingress_bytes.load(Ordering::Relaxed),
+            egress_bytes: self.egress_bytes.load(Ordering::Relaxed),
+            requests: self.requests.load(Ordering::Relaxed),
+        }
+    }
+
+    fn drain(&self) -> TrafficSample {
+        TrafficSample {
+            ingress_bytes: self.ingress_bytes.swap(0, Ordering::Relaxed),
+            egress_bytes: self.egress_bytes.swap(0, Ordering::Relaxed),
+            requests: self.requests.swap(0, Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -99,6 +140,7 @@ pub struct AppMetrics {
     completed_downloads: IntGauge,
     uptime_seconds: IntGauge,
     started_at: std::time::Instant,
+    current_traffic: Arc<[AtomicTraffic; 3]>,
     traffic_window: Arc<Mutex<TrafficWindow>>,
 }
 
@@ -197,6 +239,7 @@ impl AppMetrics {
             completed_downloads,
             uptime_seconds,
             started_at: std::time::Instant::now(),
+            current_traffic: Arc::new(std::array::from_fn(|_| AtomicTraffic::default())),
             traffic_window: Arc::new(Mutex::new(TrafficWindow::default())),
         })
     }
@@ -231,6 +274,10 @@ impl AppMetrics {
         self.traffic_snapshot_at(unix_timestamp())
     }
 
+    pub fn sample_traffic(&self) {
+        self.sample_traffic_at(unix_timestamp().saturating_sub(1));
+    }
+
     pub fn set_population(
         &self,
         peers: usize,
@@ -261,35 +308,32 @@ impl AppMetrics {
         protocol: &'static str,
         ingress_bytes: u64,
         egress_bytes: u64,
-        second: u64,
+        _second: u64,
     ) {
         let (request_counter, ingress_counter, egress_counter) =
             self.traffic_counters.select(protocol);
         request_counter.inc();
         ingress_counter.inc_by(ingress_bytes);
         egress_counter.inc_by(egress_bytes);
+        self.current_traffic[protocol_index(protocol)].add(ingress_bytes, egress_bytes);
+    }
 
-        let Ok(mut window) = self.traffic_window.lock() else {
-            return;
-        };
-        prune_window(&mut window, second);
-        if let Some(bucket) = window
-            .buckets
-            .iter_mut()
-            .find(|bucket| bucket.second == second && bucket.protocol == protocol)
-        {
-            bucket.ingress_bytes += ingress_bytes;
-            bucket.egress_bytes += egress_bytes;
-            bucket.requests += 1;
-        } else {
+    fn sample_traffic_at(&self, second: u64) {
+        let mut window = self.lock_traffic_window();
+        for (index, protocol) in TRAFFIC_PROTOCOLS.iter().enumerate() {
+            let sample = self.current_traffic[index].drain();
+            if sample.requests == 0 && sample.ingress_bytes == 0 && sample.egress_bytes == 0 {
+                continue;
+            }
             window.buckets.push_back(TrafficBucket {
                 second,
                 protocol,
-                ingress_bytes,
-                egress_bytes,
-                requests: 1,
+                ingress_bytes: sample.ingress_bytes,
+                egress_bytes: sample.egress_bytes,
+                requests: sample.requests,
             });
         }
+        prune_window(&mut window, second.saturating_add(1));
     }
 
     fn traffic_snapshot_at(&self, second: u64) -> TrafficSnapshot {
@@ -305,23 +349,27 @@ impl AppMetrics {
                 + self.traffic_counters.udp_egress.get(),
             ..TrafficSnapshot::default()
         };
-        if let Ok(mut window) = self.traffic_window.lock() {
-            prune_window(&mut window, second);
-            let last_completed_second = second.saturating_sub(1);
-            for bucket in &window.buckets {
-                let traffic = match bucket.protocol {
-                    "torrent_http" => &mut snapshot.torrent_http,
-                    "web_http" => &mut snapshot.web_http,
-                    _ => &mut snapshot.udp,
-                };
-                traffic.ingress_bytes += bucket.ingress_bytes;
-                traffic.egress_bytes += bucket.egress_bytes;
-                traffic.requests_per_minute += bucket.requests;
-                if bucket.second == last_completed_second && bucket.protocol != "web_http" {
-                    snapshot.tracker_requests_last_second += bucket.requests;
-                }
+        let mut window = self.lock_traffic_window();
+        prune_window(&mut window, second);
+        let last_completed_second = second.saturating_sub(1);
+        for bucket in &window.buckets {
+            add_to_snapshot(
+                &mut snapshot,
+                bucket.protocol,
+                TrafficSample {
+                    ingress_bytes: bucket.ingress_bytes,
+                    egress_bytes: bucket.egress_bytes,
+                    requests: bucket.requests,
+                },
+            );
+            if bucket.second == last_completed_second && bucket.protocol != "web_http" {
+                snapshot.tracker_requests_last_second += bucket.requests;
             }
         }
+        for (index, protocol) in TRAFFIC_PROTOCOLS.iter().enumerate() {
+            add_to_snapshot(&mut snapshot, protocol, self.current_traffic[index].load());
+        }
+        drop(window);
         snapshot.http = ProtocolTraffic {
             ingress_bytes: snapshot.torrent_http.ingress_bytes + snapshot.web_http.ingress_bytes,
             egress_bytes: snapshot.torrent_http.egress_bytes + snapshot.web_http.egress_bytes,
@@ -343,6 +391,39 @@ impl AppMetrics {
             .set(snapshot.tracker_requests_last_second as i64);
         snapshot
     }
+
+    fn lock_traffic_window(&self) -> MutexGuard<'_, TrafficWindow> {
+        self.traffic_window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+const TRAFFIC_PROTOCOLS: [&str; 3] = ["torrent_http", "web_http", "udp"];
+
+fn saturating_add(counter: &AtomicU64, increment: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(increment))
+    });
+}
+
+fn protocol_index(protocol: &str) -> usize {
+    match protocol {
+        "torrent_http" => 0,
+        "web_http" => 1,
+        _ => 2,
+    }
+}
+
+fn add_to_snapshot(snapshot: &mut TrafficSnapshot, protocol: &str, sample: TrafficSample) {
+    let traffic = match protocol {
+        "torrent_http" => &mut snapshot.torrent_http,
+        "web_http" => &mut snapshot.web_http,
+        _ => &mut snapshot.udp,
+    };
+    traffic.ingress_bytes = traffic.ingress_bytes.saturating_add(sample.ingress_bytes);
+    traffic.egress_bytes = traffic.egress_bytes.saturating_add(sample.egress_bytes);
+    traffic.requests_per_minute = traffic.requests_per_minute.saturating_add(sample.requests);
 }
 
 fn prune_window(window: &mut TrafficWindow, second: u64) {
@@ -358,6 +439,7 @@ mod tests {
     fn given_traffic_outside_window_when_snapshotted_then_only_recent_requests_remain() {
         let metrics = AppMetrics::new().expect("metrics should initialize");
         metrics.record_traffic_at("web_http", 100, 200, 1_000);
+        metrics.sample_traffic_at(1_000);
         metrics.record_traffic_at("udp", 10, 20, 1_060);
 
         let snapshot = metrics.traffic_snapshot_at(1_060);
@@ -414,6 +496,8 @@ mod tests {
     #[test]
     fn given_recent_traffic_when_snapshotted_then_only_last_completed_tracker_second_is_returned() {
         let metrics = AppMetrics::new().expect("metrics should initialize");
+        metrics.record_traffic_at("udp", 1, 1, 998);
+        metrics.sample_traffic_at(998);
         for _ in 0..2 {
             metrics.record_traffic_at("torrent_http", 1, 1, 999);
         }
@@ -423,8 +507,8 @@ mod tests {
         for _ in 0..4 {
             metrics.record_traffic_at("web_http", 1, 1, 999);
         }
+        metrics.sample_traffic_at(999);
         metrics.record_traffic_at("torrent_http", 1, 1, 1_000);
-        metrics.record_traffic_at("udp", 1, 1, 998);
 
         let snapshot = metrics.traffic_snapshot_at(1_000);
 
@@ -437,7 +521,9 @@ mod tests {
     fn given_no_tracker_traffic_in_last_second_when_snapshotted_then_realtime_rate_is_zero() {
         let metrics = AppMetrics::new().expect("metrics should initialize");
         metrics.record_traffic_at("torrent_http", 1, 1, 998);
+        metrics.sample_traffic_at(998);
         metrics.record_traffic_at("web_http", 1, 1, 999);
+        metrics.sample_traffic_at(999);
 
         let snapshot = metrics.traffic_snapshot_at(1_000);
 
@@ -480,5 +566,32 @@ mod tests {
         assert_eq!(snapshot.torrent_http.requests_per_minute, 8_000);
         assert_eq!(snapshot.torrent_http.ingress_bytes, 16_000);
         assert_eq!(snapshot.torrent_http.egress_bytes, 24_000);
+    }
+
+    #[test]
+    fn given_concurrent_traffic_and_sampling_when_snapshotted_then_no_counts_are_lost() {
+        let metrics = AppMetrics::new().expect("metrics should initialize");
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let metrics = metrics.clone();
+                scope.spawn(move || {
+                    for _ in 0..1_000 {
+                        metrics.record_traffic_at("udp", 2, 3, 1_000);
+                    }
+                });
+            }
+            let metrics = metrics.clone();
+            scope.spawn(move || {
+                for _ in 0..100 {
+                    metrics.sample_traffic_at(1_000);
+                }
+            });
+        });
+        metrics.sample_traffic_at(1_000);
+
+        let snapshot = metrics.traffic_snapshot_at(1_000);
+        assert_eq!(snapshot.udp.requests_per_minute, 8_000);
+        assert_eq!(snapshot.udp.ingress_bytes, 16_000);
+        assert_eq!(snapshot.udp.egress_bytes, 24_000);
     }
 }

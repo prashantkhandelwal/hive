@@ -3,9 +3,13 @@ use std::{
     net::IpAddr,
     path::Path,
     str::FromStr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
+use dashmap::DashMap;
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use thiserror::Error;
@@ -29,9 +33,17 @@ pub enum PersistenceError {
     InvalidIdentifier { field: &'static str, actual: usize },
 }
 
+fn saturating_add(counter: &AtomicU64, increment: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(increment))
+    });
+}
+
 #[derive(Clone)]
 pub struct Persistence {
     backend: PersistenceBackend,
+    client_announce_deltas: Arc<DashMap<&'static str, AtomicU64>>,
+    client_flush_lock: Arc<Mutex<()>>,
     traffic_checkpoint: Arc<Mutex<TrafficCheckpoint>>,
     history_cache: Arc<Mutex<HashMap<(u64, u64), DashboardHistory>>>,
 }
@@ -101,6 +113,8 @@ impl Persistence {
             backend: PersistenceBackend::Memory(Arc::new(Mutex::new(
                 MemoryDashboardHistory::default(),
             ))),
+            client_announce_deltas: Arc::new(DashMap::new()),
+            client_flush_lock: Arc::new(Mutex::new(())),
             traffic_checkpoint: Arc::new(Mutex::new(TrafficCheckpoint::default())),
             history_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -168,28 +182,67 @@ impl Persistence {
         .await?;
         Ok(Self {
             backend: PersistenceBackend::Sqlite(pool),
+            client_announce_deltas: Arc::new(DashMap::new()),
+            client_flush_lock: Arc::new(Mutex::new(())),
             traffic_checkpoint: Arc::new(Mutex::new(TrafficCheckpoint::default())),
             history_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    pub async fn record_client_announce(&self, peer_id: PeerId) -> Result<()> {
+    pub fn record_client_announce(&self, peer_id: PeerId) {
+        if !matches!(&self.backend, PersistenceBackend::Sqlite(_)) {
+            return;
+        }
+        let client_name = client::detect(peer_id);
+        let counter = self
+            .client_announce_deltas
+            .entry(client_name)
+            .or_insert_with(|| AtomicU64::new(0));
+        saturating_add(&counter, 1);
+    }
+
+    pub async fn flush_client_announces(&self) -> Result<()> {
         let PersistenceBackend::Sqlite(pool) = &self.backend else {
             return Ok(());
         };
-        let client_name = client::detect(peer_id);
-        sqlx::query(
-            "INSERT INTO client_statistics (client_name, peer_count)
-             VALUES (?, 1)
-             ON CONFLICT(client_name) DO UPDATE SET
-                peer_count = CASE
-                    WHEN peer_count < 9223372036854775807 THEN peer_count + 1
-                    ELSE peer_count
-                END",
-        )
-        .bind(client_name)
-        .execute(pool)
-        .await?;
+        let _flush_guard = self.client_flush_lock.lock().await;
+        let deltas = self
+            .client_announce_deltas
+            .iter()
+            .filter_map(|entry| {
+                let delta = entry.value().load(Ordering::Relaxed).min(i64::MAX as u64);
+                (delta > 0).then_some((*entry.key(), delta))
+            })
+            .collect::<Vec<_>>();
+        if deltas.is_empty() {
+            return Ok(());
+        }
+
+        let mut transaction = pool.begin().await?;
+        for (client_name, delta) in &deltas {
+            sqlx::query(
+                "INSERT INTO client_statistics (client_name, peer_count)
+                 VALUES (?, ?)
+                 ON CONFLICT(client_name) DO UPDATE SET
+                    peer_count = CASE
+                        WHEN peer_count <= 9223372036854775807 - excluded.peer_count
+                            THEN peer_count + excluded.peer_count
+                        ELSE 9223372036854775807
+                    END",
+            )
+            .bind(client_name)
+            .bind(*delta as i64)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        for (client_name, delta) in deltas {
+            if let Some(counter) = self.client_announce_deltas.get(client_name) {
+                let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    Some(value.saturating_sub(delta))
+                });
+            }
+        }
         Ok(())
     }
 
@@ -835,18 +888,20 @@ mod tests {
         let mut qbittorrent_peer_id = [b'-'; 20];
         qbittorrent_peer_id[..8].copy_from_slice(b"-qB4500-");
 
-        database
-            .record_client_announce(qbittorrent_peer_id)
+        database.record_client_announce(qbittorrent_peer_id);
+        database.record_client_announce(qbittorrent_peer_id);
+        database.record_client_announce([0xff; 20]);
+
+        assert!(database
+            .client_statistics()
             .await
-            .expect("first client announce should persist");
+            .expect("unflushed client statistics should load")
+            .is_empty());
+
         database
-            .record_client_announce(qbittorrent_peer_id)
+            .flush_client_announces()
             .await
-            .expect("second client announce should persist");
-        database
-            .record_client_announce([0xff; 20])
-            .await
-            .expect("unknown client announce should persist");
+            .expect("client announce batch should persist");
 
         assert_eq!(
             database
@@ -863,6 +918,23 @@ mod tests {
                     peer_count: 1,
                 },
             ]
+        );
+
+        database.record_client_announce(qbittorrent_peer_id);
+        database
+            .flush_client_announces()
+            .await
+            .expect("second client announce batch should persist");
+
+        assert_eq!(
+            database
+                .client_statistics()
+                .await
+                .expect("updated client statistics should load")[0],
+            ClientStatistic {
+                client_name: "qBittorrent".to_owned(),
+                peer_count: 3,
+            }
         );
 
         if let PersistenceBackend::Sqlite(pool) = &database.backend {

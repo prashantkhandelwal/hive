@@ -15,7 +15,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tower::limit::ConcurrencyLimitLayer;
-use tracing::{debug, error};
+use tracing::debug;
 
 use crate::{
     config::{AppConfig, Protocol},
@@ -233,12 +233,7 @@ async fn announce(
         .min(200);
     let event = parse_event(first(&params, "event"))?;
     let compact = parse_compact(first(&params, "compact"))?;
-    let client_persistence = context.persistence.clone();
-    tokio::spawn(async move {
-        if let Err(error) = client_persistence.record_client_announce(peer_id).await {
-            error!(%error, "failed to persist HTTP announce client");
-        }
-    });
+    context.persistence.record_client_announce(peer_id);
     let peer = Peer {
         peer_id,
         ip: client_ip,
