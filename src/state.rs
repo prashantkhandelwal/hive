@@ -286,17 +286,26 @@ impl TrackerState {
         let mut removed_leechers = 0;
         let mut changed = HashSet::new();
         self.swarms.retain(|info_hash, swarm| {
-            let before = swarm.peers.len();
-            let seeders_before = swarm.complete;
-            swarm.peers.retain(|_, peer| peer.last_seen >= cutoff);
-            let removed = before - swarm.peers.len();
+            let mut swarm_removed_seeders = 0;
+            let mut swarm_removed_leechers = 0;
+            swarm.peers.retain(|_, peer| {
+                let retain = peer.last_seen >= cutoff;
+                if !retain {
+                    if peer.left == 0 {
+                        swarm_removed_seeders += 1;
+                    } else {
+                        swarm_removed_leechers += 1;
+                    }
+                }
+                retain
+            });
+            let removed = swarm_removed_seeders + swarm_removed_leechers;
             if removed > 0 {
-                let seeders_after = swarm.peers.values().filter(|peer| peer.left == 0).count();
-                swarm.complete = seeders_after;
-                swarm.incomplete = swarm.peers.len() - seeders_after;
+                swarm.complete = swarm.complete.saturating_sub(swarm_removed_seeders);
+                swarm.incomplete = swarm.incomplete.saturating_sub(swarm_removed_leechers);
                 removed_peers += removed;
-                removed_seeders += seeders_before - seeders_after;
-                removed_leechers += removed - (seeders_before - seeders_after);
+                removed_seeders += swarm_removed_seeders;
+                removed_leechers += swarm_removed_leechers;
                 changed.insert(*info_hash);
             }
             if swarm.peers.is_empty() {
@@ -570,6 +579,41 @@ mod tests {
         assert_eq!(state.peer_count(), 0);
         assert_eq!(state.swarm_count(), 0);
         assert_eq!(state.torrent_count(), 0);
+    }
+
+    #[test]
+    fn given_mixed_stale_peers_when_cleaned_up_then_peer_counts_remain_consistent() {
+        let state = TrackerState::default();
+        let info_hash = [14; 20];
+        let mut stale_seeder = peer(2, 0);
+        stale_seeder.last_seen = 0;
+        let mut stale_leecher = peer(4, 100);
+        stale_leecher.last_seen = 0;
+
+        state.announce(info_hash, peer(1, 0), AnnounceEvent::Started);
+        state.announce(info_hash, stale_seeder, AnnounceEvent::Started);
+        state.announce(info_hash, peer(3, 100), AnnounceEvent::Started);
+        state.announce(info_hash, stale_leecher, AnnounceEvent::Started);
+        state.remove_stale(Duration::from_secs(60));
+
+        assert_eq!(
+            state.stats(&info_hash),
+            SwarmStats {
+                complete: 1,
+                incomplete: 1,
+                downloaded: 0,
+            }
+        );
+        assert_eq!(
+            state.summary(),
+            TrackerSummary {
+                peers: 2,
+                seeders: 1,
+                leechers: 1,
+                torrents: 1,
+                completed: 0,
+            }
+        );
     }
 
     #[test]

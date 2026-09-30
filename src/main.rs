@@ -408,15 +408,21 @@ async fn periodic_maintenance(
         let peers_before = state.peer_count();
         let cleanup_state = Arc::clone(&state);
         let cleanup_rate_limiter = Arc::clone(&rate_limiter);
-        if let Err(error) = tokio::task::spawn_blocking(move || {
+        let cleanup_duration = match tokio::task::spawn_blocking(move || {
+            let cleanup_started = Instant::now();
             cleanup_state.remove_stale(peer_timeout);
+            let cleanup_duration = cleanup_started.elapsed();
             cleanup_rate_limiter.remove_idle();
+            cleanup_duration
         })
         .await
         {
-            error!(%error, "tracker cleanup task failed");
-            continue;
-        }
+            Ok(duration) => duration,
+            Err(error) => {
+                error!(%error, "tracker cleanup task failed");
+                continue;
+            }
+        };
         let state_saved = match persistence.save(&state).await {
             Ok(()) => true,
             Err(error) => {
@@ -442,6 +448,7 @@ async fn periodic_maintenance(
                     peers = state.peer_count(),
                     removed_peers = peers_before.saturating_sub(state.peer_count()),
                     swarms = state.swarm_count(),
+                    cleanup_duration_ms = cleanup_duration.as_secs_f64() * 1_000.0,
                     "periodic maintenance completed"
                 );
             }
