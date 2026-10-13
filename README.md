@@ -174,7 +174,7 @@ curl --fail http://127.0.0.1:3000/health
 
 The single-page dashboard shows peers, seeders, leechers, torrents, completed
 downloads, uptime, and tracker requests from the last completed second. Current
-statistics refresh every five seconds, independently of historical data. Its
+statistics refresh every second, independently of historical data. Its
 shared trend chart supports day, week, and month views. Metric
 snapshots and daily ingress and egress totals are stored in SQLite, so transfer
 totals can be summed across the selected period. The
